@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
 	"nexus-hub-core/dispatcher"
-	"nexus-hub-core/monitor"
+	"nexus-hub-core/printer"
+	"nexus-hub-core/scheduler"
 	"nexus-hub-core/web"
 	"os"
 	"os/signal"
@@ -14,58 +16,72 @@ import (
 )
 
 func main() {
-	// 1. Флаги запуска
+	// 1. Command line flags
 	isDebug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
-	// 2. Инициализация БД (SQLite)
+	// 2. Initialize database (SQLite)
 	database, err := db.NewDatabase("hub.db")
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %v", err)
 	}
 
-	// 3. Каналы (Channels) — замена mpsc и broadcast
-	// internalChan — для сбора данных
-	internalChan := make(chan api.NexusPacket, 100)
+	// 3. Create context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Для широковещания (broadcast) в Go обычно используют список подписчиков
-	// или простую обертку, но для начала сделаем базовую логику
-	broadcastChan := make(chan api.NexusPacket, 100)
+	// 4. Channels with pub-sub hub for broadcasting
+	hub := api.NewHub()
+	hub.Run(ctx)
 
-	// 4. Воркер логирования и распределения (аналог твоего токио-спавна)
+	// 5. Worker for logging and distribution
 	go func() {
-		for packet := range internalChan {
-			// Сохраняем в БД
-			_ = database.SaveEvent(packet)
-
-			// Отправляем в бродкаст (всем, кто слушает)
-			select {
-			case broadcastChan <- packet:
-			default:
-				// Если канал полон, пропускаем, чтобы не блокировать систему
+		for packet := range hub.GetInternalChan() {
+			// Save to database
+			if err := database.SaveEvent(packet); err != nil {
+				log.Printf("Failed to save event: %v", err)
 			}
 		}
 	}()
 
-	// 5. Запуск модулей (Goroutines вместо tokio::spawn)
+	// 6. Start modules (Goroutines)
 	if *isDebug {
-		go debugLogger(broadcastChan)
+		go debugLogger(ctx, hub.Subscribe())
 	}
 
-	go monitor.StartLocalCollection(internalChan)
-	go web.StartWebEngine(database, broadcastChan, 8080)
-	go dispatcher.StartDispatching(database, broadcastChan)
+	// Start printer status poller
+	poller := printer.NewPoller(database, hub)
+	go poller.Start(ctx)
 
-	// 6. Ожидание завершения (Ctrl+C)
+	// Start job scheduler
+	sched := scheduler.NewScheduler(database, hub, &dispatcher.AutoMode)
+	go sched.Start(ctx)
+
+	// Start dispatcher (manual mode support)
+	go dispatcher.StartDispatching(ctx, database, hub)
+
+	// Start web server
+	go web.StartWebEngine(database, hub, 8080)
+
+	// 7. Wait for shutdown signal (Ctrl+C)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
 	log.Println("Shutting down Nexus Hub...")
+	cancel()
 }
 
-func debugLogger(ch chan api.NexusPacket) {
-	for packet := range ch {
-		log.Printf("[DEBUG] Received packet: %s", packet.EventType)
+func debugLogger(ctx context.Context, ch <-chan api.NexusPacket) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case packet, ok := <-ch:
+			if !ok {
+				return
+			}
+			log.Printf("[DEBUG] Received packet: %s", packet.EventType)
+		}
 	}
 }

@@ -12,7 +12,7 @@ type Database struct {
 	Conn *sql.DB
 }
 
-// Структуры данных для JSON
+// Data structures for JSON
 type PrintJob struct {
 	ID              int64     `json:"id"`
 	Filename        string    `json:"filename"`
@@ -46,6 +46,12 @@ func NewDatabase(dbPath string) (*Database, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Configure connection pooling
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
 	d := &Database{Conn: db}
 	err = d.setupTables()
 	return d, err
@@ -59,15 +65,6 @@ func (d *Database) setupTables() error {
 			module TEXT NOT NULL,
 			level TEXT NOT NULL,
 			message TEXT NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS host_metrics (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			timestamp DATETIME NOT NULL,
-			cpu_load REAL NOT NULL,
-			gpu_load REAL NOT NULL,
-			ram_usage_mb INTEGER NOT NULL,
-			gpu_temp REAL,
-			cpu_temp REAL
 		)`,
 		`CREATE TABLE IF NOT EXISTS clusters (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,7 +100,7 @@ func (d *Database) setupTables() error {
 	return nil
 }
 
-// --- Методы работы с задачами (Jobs) ---
+// --- Print Job Methods ---
 
 func (d *Database) AddPrintJob(filename, filament, printerModel string, timeS uint64) error {
 	_, err := d.Conn.Exec(
@@ -174,7 +171,7 @@ func (d *Database) GetNextPendingJob() (int64, string, string, error) {
 	return id, filename, filament, err
 }
 
-// --- Методы работы с Кластерами и Принтерами ---
+// --- Cluster and Printer Methods ---
 
 func (d *Database) CreateCluster(name, targetModel string) error {
 	_, err := d.Conn.Exec("INSERT INTO clusters (name, target_model) VALUES (?, ?)", name, targetModel)
@@ -201,18 +198,24 @@ func (d *Database) GetClustersWithPrinters() ([]Cluster, error) {
 	for rows.Next() {
 		var c Cluster
 		var enabled int
-		rows.Scan(&c.ID, &c.Name, &c.TargetModel, &enabled)
+		if err := rows.Scan(&c.ID, &c.Name, &c.TargetModel, &enabled); err != nil {
+			continue
+		}
 		c.IsEnabled = enabled == 1
 		c.Printers = []Printer{}
 		clusters = append(clusters, c)
 	}
 
 	for i := range clusters {
-		pRows, _ := d.Conn.Query("SELECT id, cluster_id, name, ip_address, status FROM printers WHERE cluster_id = ?", clusters[i].ID)
+		pRows, err := d.Conn.Query("SELECT id, cluster_id, name, ip_address, status FROM printers WHERE cluster_id = ?", clusters[i].ID)
+		if err != nil {
+			continue
+		}
 		for pRows.Next() {
 			var p Printer
-			pRows.Scan(&p.ID, &p.ClusterID, &p.Name, &p.IPAddress, &p.Status)
-			clusters[i].Printers = append(clusters[i].Printers, p)
+			if err := pRows.Scan(&p.ID, &p.ClusterID, &p.Name, &p.IPAddress, &p.Status); err == nil {
+				clusters[i].Printers = append(clusters[i].Printers, p)
+			}
 		}
 		pRows.Close()
 	}
@@ -234,16 +237,15 @@ func (d *Database) DeleteCluster(id int64) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 
 	_, err = tx.Exec("DELETE FROM printers WHERE cluster_id = ?", id)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 
 	_, err = tx.Exec("DELETE FROM clusters WHERE id = ?", id)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 
@@ -251,7 +253,7 @@ func (d *Database) DeleteCluster(id int64) error {
 }
 
 func (d *Database) GetUnassignedModels() ([]string, error) {
-	query := `SELECT DISTINCT printer_model FROM print_jobs 
+	query := `SELECT DISTINCT printer_model FROM print_jobs
 			  WHERE printer_model NOT IN (SELECT target_model FROM clusters)`
 	rows, err := d.Conn.Query(query)
 	if err != nil {
@@ -269,18 +271,10 @@ func (d *Database) GetUnassignedModels() ([]string, error) {
 	return models, nil
 }
 
-// --- Служебные методы (Логи и Метрики) ---
+// --- Service Methods (Logs) ---
 
 func (d *Database) SaveEvent(event api.NexusPacket) error {
-	now := time.Now()
-	if event.EventType == "HOST_METRICS" {
-		m := event.Payload.(api.HostHardwareState)
-		_, err := d.Conn.Exec(
-			"INSERT INTO host_metrics (timestamp, cpu_load, gpu_load, ram_usage_mb, gpu_temp, cpu_temp) VALUES (?, ?, ?, ?, ?, ?)",
-			now, m.CPUUsageTotal, m.GPULoadPercent, m.RAMUsedMB, m.GPUTempCelsius, m.CPUPackageTemp,
-		)
-		return err
-	} else if event.Log != nil {
+	if event.Log != nil {
 		_, err := d.Conn.Exec(
 			"INSERT INTO system_logs (timestamp, module, level, message) VALUES (?, ?, ?, ?)",
 			event.Log.Timestamp, event.Log.Module, event.Log.Level, event.Log.Message,
