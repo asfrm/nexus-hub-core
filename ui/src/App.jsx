@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard';
 import Jobs from './components/Jobs';
 import Clusters from './components/Clusters';
+import Analytics from './components/Analytics';
 import Settings from './components/Settings';
 
 function App() {
@@ -32,6 +33,8 @@ function App() {
         return <Jobs />;
       case 'clusters':
         return <Clusters />;
+      case 'analytics':
+        return <Analytics />;
       case 'settings':
         return <Settings />;
       default:
@@ -42,7 +45,8 @@ function App() {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'jobs', label: 'Job Queue', icon: '📋' },
-    { id: 'clusters', label: 'Clusters', icon: '🖨️' },
+    { id: 'clusters', label: 'Printers', icon: '🖨️' },
+    { id: 'analytics', label: 'Analytics', icon: '📈' },
     { id: 'settings', label: 'Settings', icon: '⚙️' },
   ];
 

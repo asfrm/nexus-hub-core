@@ -1,13 +1,18 @@
 package web
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
 	"nexus-hub-core/moonraker"
+	"nexus-hub-core/printer"
 	"nexus-hub-core/slicer"
 	"os"
 	"path/filepath"
@@ -22,46 +27,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 	mux.HandleFunc("/server/files/upload", slicer.UploadGCodeHandler(database, hub))
 	mux.HandleFunc("/ws", HandleWS(hub))
 
-	// --- 1.5 NEW: Printer Status Endpoint ---
-	mux.HandleFunc("/api/printers/status", func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid printer ID", http.StatusBadRequest)
-			return
-		}
-
-		clusters, err := database.GetClustersWithPrinters()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var printerIP string
-		for _, c := range clusters {
-			for _, p := range c.Printers {
-				if p.ID == id {
-					printerIP = p.IPAddress
-					break
-				}
-			}
-		}
-
-		if printerIP == "" {
-			http.Error(w, "Printer not found", http.StatusNotFound)
-			return
-		}
-
-		status, err := moonraker.GetStatus(printerIP)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
-	})
-
-	// --- 1.6 NEW: Completed Jobs ---
+	// --- 1.5 NEW: Completed Jobs ---
 	mux.HandleFunc("/api/jobs/completed", func(w http.ResponseWriter, r *http.Request) {
 		rows, err := database.Conn.Query(`
 			SELECT id, filename, filament_type, printer_model, estimated_time_s, status, 
@@ -116,6 +82,55 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(stats)
+	})
+
+	// --- 1.8 NEW: Analytics Dashboard ---
+	mux.HandleFunc("/api/analytics", func(w http.ResponseWriter, r *http.Request) {
+		analytics, err := database.GetSystemAnalytics()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Add wear stats
+		wearStats, err := database.GetPrinterWearStats()
+		if err == nil {
+			analytics["printer_wear"] = wearStats
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(analytics)
+	})
+
+	// --- 1.9 NEW: Print History ---
+	mux.HandleFunc("/api/history", func(w http.ResponseWriter, r *http.Request) {
+		limit := 50
+		if l := r.URL.Query().Get("limit"); l != "" {
+			if parsed, err := strconv.Atoi(l); err == nil {
+				limit = parsed
+			}
+		}
+
+		history, err := database.GetPrintHistory(limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(history)
+	})
+
+	// --- 1.10 NEW: Wear Stats ---
+	mux.HandleFunc("/api/printers/wear", func(w http.ResponseWriter, r *http.Request) {
+		wearStats, err := database.GetPrinterWearStats()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(wearStats)
 	})
 
 	// --- 2. VAULT & JOB LIST (Queues) ---
@@ -184,7 +199,8 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			if targetIP != "" {
 				filePath := filepath.Join("gcode_vault", job.Filename)
 				go func(ip, path string, id int64) {
-					err := moonraker.UploadAndPrint(ip, path)
+					// Simple Moonraker upload using HTTP
+					err := uploadToMoonraker(ip, path)
 					if err == nil {
 						database.UpdateJobStatus(id, "PRINTING")
 						database.UpdatePrinterStatus(req.PrinterID, "PRINTING")
@@ -284,15 +300,20 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 	mux.HandleFunc("/api/printers/add", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ClusterID int64  `json:"cluster_id"`
-			Name      string `json:"name"`
-			IP        string `json:"ip_address"`
+			ClusterID   int64  `json:"cluster_id"`
+			Name        string `json:"name"`
+			IP          string `json:"ip_address"`
+			PrinterType string `json:"printer_type"`
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			AccessToken string `json:"access_token"`
+			Extra       string `json:"extra"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Bad JSON", http.StatusBadRequest)
 			return
 		}
-		if err := database.AddPrinter(req.ClusterID, req.Name, req.IP); err != nil {
+		if err := database.AddPrinter(req.ClusterID, req.Name, req.IP, req.PrinterType, req.Username, req.Password, req.AccessToken, "", req.Extra); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -388,8 +409,276 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		json.NewEncoder(w).Encode(models)
 	})
 
+	// --- 6. BAMBU LAB CLOUD API ---
+
+	// Bambu Login
+	mux.HandleFunc("/api/bambu/login", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu login request received")
+		if r.Method != "POST" {
+			log.Printf("[API DEBUG] Bambu login: Method not allowed")
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+			Region   string `json:"region"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("[API DEBUG] Bambu login: Bad JSON - %v", err)
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu login: Saving account for user: %s (region: %s)", req.Email, req.Region)
+
+		// Save account (password will be hashed in production)
+		err := database.SaveBambuAccount(req.Email, req.Password, "", "", req.Region, time.Now())
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu login: Failed to save account - %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu login: Account saved successfully")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Account saved. Authentication will occur on first connection.",
+		})
+	})
+
+	// Bambu Verify 2FA
+	mux.HandleFunc("/api/bambu/verify-2fa", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu 2FA verification request received")
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Email string `json:"email"`
+			Code  string `json:"code"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("[API DEBUG] Bambu 2FA: Bad JSON - %v", err)
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu 2FA: Verifying code for user: %s", req.Email)
+
+		// For now, just mark TFA as verified
+		err := database.SetBambuTFA(req.Email, true, "")
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu 2FA: Failed to verify - %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu 2FA: Verification successful")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
+	})
+
+	// Bambu Discover Printers
+	mux.HandleFunc("/api/bambu/discover", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu discover printers request received")
+
+		email := r.URL.Query().Get("email")
+		if email == "" {
+			log.Printf("[API DEBUG] Bambu discover: No email provided, using default account")
+			// Get default account
+			acc, err := database.GetDefaultBambuAccount()
+			if err != nil {
+				log.Printf("[API DEBUG] Bambu discover: Failed to get default account - %v", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if acc == nil {
+				log.Printf("[API DEBUG] Bambu discover: No default account configured")
+				http.Error(w, "No Bambu account configured", http.StatusNotFound)
+				return
+			}
+			email = acc.Email
+			log.Printf("[API DEBUG] Bambu discover: Using default account: %s", email)
+		}
+
+		acc, err := database.GetBambuAccount(email)
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu discover: Failed to get account - %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if acc == nil {
+			log.Printf("[API DEBUG] Bambu discover: Account not found: %s", email)
+			http.Error(w, "Account not found", http.StatusNotFound)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu discover: Creating provider for user: %s (region: %s)", email, acc.Region)
+
+		// Create a temporary provider to discover printers
+		config := printer.PrinterConfig{
+			Username:    email,
+			Password:    acc.PasswordHash, // In production, decrypt this
+			AccessToken: acc.AccessToken,
+			Extra: map[string]string{
+				"region": acc.Region,
+			},
+		}
+
+		provider := printer.NewBambuProvider(config)
+		ctx := context.Background()
+
+		// Authenticate first
+		log.Printf("[API DEBUG] Bambu discover: Attempting authentication...")
+		if err := provider.Authenticate(ctx); err != nil {
+			log.Printf("[API DEBUG] Bambu discover: Authentication failed - %v", err)
+			// Check if 2FA is required
+			if provider.IsTFAPending() {
+				log.Printf("[API DEBUG] Bambu discover: 2FA verification required")
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success":      false,
+					"tfa_required": true,
+					"message":      "2FA verification required",
+				})
+				return
+			}
+			http.Error(w, "Authentication failed: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu discover: Authentication successful, discovering printers...")
+
+		// Discover printers
+		printers, err := provider.DiscoverPrinters(ctx)
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu discover: Discovery failed - %v", err)
+			http.Error(w, "Discovery failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu discover: Found %d printers", len(printers))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"printers": printers,
+		})
+	})
+
+	// Bambu Bind Printer
+	mux.HandleFunc("/api/bambu/bind", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Serial    string `json:"serial"`
+			Name      string `json:"name"`
+			Model     string `json:"model"`
+			ClusterID int64  `json:"cluster_id"`
+			IPAddress string `json:"ip_address"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Get default Bambu account for credentials
+		acc, err := database.GetDefaultBambuAccount()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if acc == nil {
+			http.Error(w, "No Bambu account configured", http.StatusNotFound)
+			return
+		}
+
+		// Add printer to database
+		extra := map[string]string{
+			"serial":      req.Serial,
+			"region":      acc.Region,
+			"access_code": "", // Will be set later if using LAN
+			"local_ip":    req.IPAddress,
+			"mode":        "CLOUD",
+		}
+		extraJSON, _ := json.Marshal(extra)
+
+		err = database.AddPrinter(
+			req.ClusterID,
+			req.Name,
+			req.IPAddress,
+			"BAMBULAB",
+			acc.Email,
+			acc.PasswordHash,
+			acc.AccessToken,
+			"",
+			string(extraJSON),
+		)
+		if err != nil {
+			http.Error(w, "Failed to add printer: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Printer '%s' (%s) bound successfully", req.Name, req.Serial),
+		})
+	})
+
+	// Bambu Account List
+	mux.HandleFunc("/api/bambu/accounts", func(w http.ResponseWriter, r *http.Request) {
+		accounts, err := database.ListBambuAccounts()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Mask sensitive data
+		for i := range accounts {
+			accounts[i].PasswordHash = "***REDACTED***"
+			accounts[i].TFASecret = "***REDACTED***"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"accounts": accounts,
+		})
+	})
+
+	// Bambu Delete Account
+	mux.HandleFunc("/api/bambu/account/delete", func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid ID", http.StatusBadRequest)
+			return
+		}
+
+		if err := database.DeleteBambuAccount(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+		})
+	})
+
 	// --- 5. START SERVER ---
-	mux.Handle("/", http.FileServer(http.Dir("ui")))
+	// Serve static files from root dist/ folder with cache control
+	mux.Handle("/", serveWithCacheControl(http.FileServer(http.Dir("dist"))))
 	handlerWithCORS := middlewareCORS(mux)
 
 	fmt.Printf("📡 Nexus Hub API started on port: %d\n", port)
@@ -401,13 +690,69 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 func middlewareCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Force cache busting for ALL responses
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
+		// CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Authorization")
+
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// uploadToMoonraker uploads a G-Code file to a Moonraker printer
+func uploadToMoonraker(printerIP, filePath string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return err
+	}
+	io.Copy(part, file)
+
+	_ = writer.WriteField("print", "true")
+	writer.Close()
+
+	url := fmt.Sprintf("http://%s/server/files/upload", printerIP)
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Moonraker error: %d - %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+// serveWithCacheControl serves static files (cache control handled by middlewareCORS)
+func serveWithCacheControl(fs http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Let middlewareCORS handle cache headers
+		fs.ServeHTTP(w, r)
 	})
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
+import BambuManager from './BambuManager';
 
 function Clusters() {
   const [clusters, setClusters] = useState([]);
@@ -10,6 +11,7 @@ function Clusters() {
   const [newClusterModel, setNewClusterModel] = useState('');
   const [newPrinterName, setNewPrinterName] = useState('');
   const [newPrinterIP, setNewPrinterIP] = useState('');
+  const [printerType, setPrinterType] = useState('MOONRAKER');
   const [unassignedModels, setUnassignedModels] = useState([]);
 
   useEffect(() => {
@@ -60,20 +62,6 @@ function Clusters() {
       loadData();
     } catch (err) {
       alert('Failed to toggle cluster: ' + err.message);
-    }
-  }
-
-  async function handleAddPrinter() {
-    if (!selectedCluster || !newPrinterName || !newPrinterIP) return;
-    try {
-      await api.addPrinter(selectedCluster.id, newPrinterName, newPrinterIP);
-      setNewPrinterName('');
-      setNewPrinterIP('');
-      setShowAddPrinterModal(false);
-      setSelectedCluster(null);
-      loadData();
-    } catch (err) {
-      alert('Failed to add printer: ' + err.message);
     }
   }
 
@@ -133,11 +121,10 @@ function Clusters() {
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleToggleCluster(cluster.id, cluster.isEnabled)}
-                  className={`px-3 py-1 rounded text-sm transition-colors ${
-                    cluster.isEnabled 
-                      ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' 
+                  className={`px-3 py-1 rounded text-sm transition-colors ${cluster.isEnabled
+                      ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
                       : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
-                  }`}
+                    }`}
                 >
                   {cluster.isEnabled ? '● Enabled' : '○ Disabled'}
                 </button>
@@ -180,6 +167,9 @@ function Clusters() {
                       <div>
                         <p className="font-medium">{printer.name}</p>
                         <p className="text-sm text-gray-400">{printer.ip_address}</p>
+                        {printer.printer_type && (
+                          <span className="text-xs text-gray-500">{printer.printer_type}</span>
+                        )}
                       </div>
                       <div className="flex items-center gap-3">
                         <span className={`px-2 py-1 rounded text-xs font-medium ${statusColors[printer.status] || statusColors.IDLE}`}>
@@ -237,7 +227,7 @@ function Clusters() {
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
           <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
             <h3 className="text-xl font-bold mb-4">Create Cluster</h3>
-            
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Cluster Name</label>
@@ -299,54 +289,106 @@ function Clusters() {
       {/* Add Printer Modal */}
       {showAddPrinterModal && selectedCluster && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
+          <div className="bg-gray-800 rounded-xl p-6 w-full max-w-lg border border-gray-700">
             <h3 className="text-xl font-bold mb-4">Add Printer</h3>
             <p className="text-gray-400 mb-4">to {selectedCluster.name}</p>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Printer Name</label>
-                <input
-                  type="text"
-                  value={newPrinterName}
-                  onChange={(e) => setNewPrinterName(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
-                  placeholder="e.g., Printer 1"
-                />
-              </div>
 
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">IP Address / Hostname</label>
-                <input
-                  type="text"
-                  value={newPrinterIP}
-                  onChange={(e) => setNewPrinterIP(e.target.value)}
-                  className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
-                  placeholder="e.g., 192.168.1.100 or printer1.local"
-                />
-                <p className="text-xs text-gray-500 mt-1">Moonraker should be accessible at this address</p>
-              </div>
+            <div className="mb-4">
+              <label className="block text-sm text-gray-400 mb-1">Printer Type</label>
+              <select
+                value={printerType}
+                onChange={(e) => setPrinterType(e.target.value)}
+                className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
+              >
+                <option value="MOONRAKER">Moonraker / Klipper</option>
+                <option value="BAMBULAB">Bambu Lab (Cloud/Local)</option>
+              </select>
             </div>
 
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={handleAddPrinter}
-                className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
-              >
-                Add Printer
-              </button>
-              <button
-                onClick={() => {
+            {printerType === 'BAMBULAB' ? (
+              <BambuManager
+                clusters={clusters}
+                onPrinterAdded={() => {
                   setShowAddPrinterModal(false);
                   setSelectedCluster(null);
-                  setNewPrinterName('');
-                  setNewPrinterIP('');
+                  loadData();
                 }}
-                className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
+              />
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Printer Name</label>
+                  <input
+                    type="text"
+                    value={newPrinterName}
+                    onChange={(e) => setNewPrinterName(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
+                    placeholder="e.g., Printer 1"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">IP Address / Hostname</label>
+                  <input
+                    type="text"
+                    value={newPrinterIP}
+                    onChange={(e) => setNewPrinterIP(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
+                    placeholder="e.g., 192.168.1.100 or printer1.local"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">Moonraker should be accessible at this address</p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={async () => {
+                      if (!newPrinterName || !newPrinterIP) {
+                        alert('Please fill in all fields');
+                        return;
+                      }
+                      try {
+                        await api.addPrinter(selectedCluster.id, newPrinterName, newPrinterIP, 'MOONRAKER');
+                        setNewPrinterName('');
+                        setNewPrinterIP('');
+                        setShowAddPrinterModal(false);
+                        setSelectedCluster(null);
+                        loadData();
+                      } catch (err) {
+                        alert('Failed to add printer: ' + err.message);
+                      }
+                    }}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+                  >
+                    Add Printer
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddPrinterModal(false);
+                      setSelectedCluster(null);
+                      setNewPrinterName('');
+                      setNewPrinterIP('');
+                    }}
+                    className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {printerType !== 'BAMBULAB' && (
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => {
+                    setShowAddPrinterModal(false);
+                    setSelectedCluster(null);
+                  }}
+                  className="flex-1 px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

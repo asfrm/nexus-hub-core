@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Scheduler handles automatic job assignment to printers
+// Scheduler handles automatic job assignment to printers with wear-leveling
 type Scheduler struct {
 	database *db.Database
 	hub      *api.Hub
@@ -58,6 +58,19 @@ func (s *Scheduler) runScheduler() {
 		return
 	}
 
+	// Get wear stats for all printers
+	wearStats, err := s.database.GetPrinterWearStats()
+	if err != nil {
+		log.Printf("Failed to get wear stats: %v", err)
+		return
+	}
+
+	// Build wear score map
+	wearScoreMap := make(map[int64]float64)
+	for _, stat := range wearStats {
+		wearScoreMap[stat.PrinterID] = stat.WearScore
+	}
+
 	// Get available clusters and printers
 	clusters, err := s.database.GetClustersWithPrinters()
 	if err != nil {
@@ -67,14 +80,15 @@ func (s *Scheduler) runScheduler() {
 
 	// Try to assign each pending job
 	for _, job := range pendingJobs {
-		assigned := s.tryAssignJob(job, clusters)
+		assigned := s.tryAssignJobWithWearLeveling(job, clusters, wearScoreMap)
 		if assigned {
 			break // Assign one job per cycle to avoid overwhelming
 		}
 	}
 }
 
-func (s *Scheduler) tryAssignJob(job db.PrintJob, clusters []db.Cluster) bool {
+// tryAssignJobWithWearLeveling assigns a job using wear-balanced selection
+func (s *Scheduler) tryAssignJobWithWearLeveling(job db.PrintJob, clusters []db.Cluster, wearScoreMap map[int64]float64) bool {
 	// Find matching cluster for this printer model
 	var matchingCluster *db.Cluster
 	for i, cluster := range clusters {
@@ -92,25 +106,34 @@ func (s *Scheduler) tryAssignJob(job db.PrintJob, clusters []db.Cluster) bool {
 		return false
 	}
 
-	// Find an idle printer in the cluster
-	var idlePrinter *db.Printer
+	// Find idle printers and select the one with lowest wear score
+	var bestPrinter *db.Printer
+	bestWearScore := float64(-1)
+
 	for i, printer := range matchingCluster.Printers {
-		if printer.Status == "IDLE" {
-			idlePrinter = &matchingCluster.Printers[i]
-			break
+		if printer.Status != "IDLE" {
+			continue
+		}
+
+		wearScore := wearScoreMap[printer.ID]
+
+		// Select printer with lowest wear score (least used)
+		if bestPrinter == nil || wearScore < bestWearScore {
+			bestPrinter = &matchingCluster.Printers[i]
+			bestWearScore = wearScore
 		}
 	}
 
-	if idlePrinter == nil {
+	if bestPrinter == nil {
 		log.Printf("No idle printer in cluster: %s", matchingCluster.Name)
 		return false
 	}
 
 	// Assign the job
-	log.Printf("Auto-assigning job '%s' to printer '%s' in cluster '%s'",
-		job.Filename, idlePrinter.Name, matchingCluster.Name)
+	log.Printf("Auto-assigning job '%s' to printer '%s' (wear score: %.2f) in cluster '%s'",
+		job.Filename, bestPrinter.Name, bestWearScore, matchingCluster.Name)
 
-	err := s.database.AssignJob(job.ID, matchingCluster.ID, idlePrinter.ID)
+	err := s.database.AssignJob(job.ID, matchingCluster.ID, bestPrinter.ID)
 	if err != nil {
 		log.Printf("Failed to assign job: %v", err)
 		return false
@@ -120,10 +143,10 @@ func (s *Scheduler) tryAssignJob(job db.PrintJob, clusters []db.Cluster) bool {
 	s.hub.Send(api.NexusPacket{
 		EventType: "SYSTEM_LOG",
 		Log: &api.LogPayload{
-			Module:    "SCHEDULER",
-			Level:     "INFO",
-			Message: fmt.Sprintf("Auto-assigned '%s' to %s (%s)",
-				job.Filename, idlePrinter.Name, matchingCluster.Name),
+			Module: "SCHEDULER",
+			Level:  "INFO",
+			Message: fmt.Sprintf("Wear-balanced assignment: '%s' → %s (score: %.1f) in %s",
+				job.Filename, bestPrinter.Name, bestWearScore, matchingCluster.Name),
 			Timestamp: time.Now(),
 		},
 	})

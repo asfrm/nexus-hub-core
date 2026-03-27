@@ -6,7 +6,6 @@ import (
 	"log"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
-	"nexus-hub-core/moonraker"
 	"sync"
 	"time"
 )
@@ -18,15 +17,19 @@ type Poller struct {
 	interval time.Duration
 	mu       sync.Mutex
 	stopCh   chan struct{}
+
+	// Printer provider cache
+	providers map[int64]PrinterProvider
 }
 
 // NewPoller creates a new printer status poller
 func NewPoller(database *db.Database, hub *api.Hub) *Poller {
 	return &Poller{
-		database: database,
-		hub:      hub,
-		interval: 5 * time.Second,
-		stopCh:   make(chan struct{}),
+		database:  database,
+		hub:       hub,
+		interval:  5 * time.Second,
+		stopCh:    make(chan struct{}),
+		providers: make(map[int64]PrinterProvider),
 	}
 }
 
@@ -41,12 +44,12 @@ func (p *Poller) Start(ctx context.Context) {
 			log.Println("Printer poller shutting down...")
 			return
 		case <-ticker.C:
-			p.pollAllPrinters()
+			p.pollAllPrinters(ctx)
 		}
 	}
 }
 
-func (p *Poller) pollAllPrinters() {
+func (p *Poller) pollAllPrinters(ctx context.Context) {
 	clusters, err := p.database.GetClustersWithPrinters()
 	if err != nil {
 		log.Printf("Failed to get clusters for polling: %v", err)
@@ -59,23 +62,28 @@ func (p *Poller) pollAllPrinters() {
 		}
 
 		for _, printer := range cluster.Printers {
-			go p.pollPrinter(printer.ID, printer.IPAddress, printer.Status)
+			go p.pollPrinter(ctx, printer)
 		}
 	}
 }
 
-func (p *Poller) pollPrinter(printerID int64, ipAddress, currentStatus string) {
-	status, err := moonraker.GetStatus(ipAddress)
+func (p *Poller) pollPrinter(ctx context.Context, printer db.Printer) {
+	provider := p.getOrCreateProvider(printer)
+	if provider == nil {
+		return
+	}
+
+	status, err := provider.GetStatus(ctx)
 	if err != nil {
 		// Printer unreachable - mark as error
-		if currentStatus != "ERROR" {
-			p.database.UpdatePrinterStatus(printerID, "ERROR")
+		if printer.Status != "ERROR" {
+			p.database.UpdatePrinterStatus(printer.ID, "ERROR")
 			p.hub.Send(api.NexusPacket{
 				EventType: "SYSTEM_LOG",
 				Log: &api.LogPayload{
 					Module:    "POLLER",
 					Level:     "ERROR",
-					Message:   fmt.Sprintf("Printer %s unreachable: %v", ipAddress, err),
+					Message:   fmt.Sprintf("Printer %s (%s) unreachable: %v", printer.Name, printer.PrinterType, err),
 					Timestamp: time.Now(),
 				},
 			})
@@ -97,12 +105,12 @@ func (p *Poller) pollPrinter(printerID int64, ipAddress, currentStatus string) {
 	}
 
 	// Update database if status changed
-	if newStatus != currentStatus {
-		p.database.UpdatePrinterStatus(printerID, newStatus)
+	if newStatus != printer.Status {
+		p.database.UpdatePrinterStatus(printer.ID, newStatus)
 
 		// If print completed, update job status
-		if newStatus == "IDLE" && currentStatus == "PRINTING" {
-			p.markJobComplete(printerID)
+		if newStatus == "IDLE" && printer.Status == "PRINTING" {
+			p.markJobComplete(printer.ID)
 		}
 
 		p.hub.Send(api.NexusPacket{
@@ -110,7 +118,7 @@ func (p *Poller) pollPrinter(printerID int64, ipAddress, currentStatus string) {
 			Log: &api.LogPayload{
 				Module:    "POLLER",
 				Level:     "INFO",
-				Message:   fmt.Sprintf("Printer %s status changed: %s -> %s", ipAddress, currentStatus, newStatus),
+				Message:   fmt.Sprintf("Printer %s status changed: %s -> %s", printer.Name, printer.Status, newStatus),
 				Timestamp: time.Now(),
 			},
 		})
@@ -120,15 +128,68 @@ func (p *Poller) pollPrinter(printerID int64, ipAddress, currentStatus string) {
 	p.hub.Send(api.NexusPacket{
 		EventType: "PRINTER_STATUS",
 		Payload: map[string]interface{}{
-			"printer_id":  printerID,
-			"status":      newStatus,
-			"filename":    status.Filename,
-			"progress":    status.Progress,
-			"time_left":   status.TimeLeft,
-			"temp_nozzle": status.TempNozzle,
-			"temp_bed":    status.TempBed,
+			"printer_id":   printer.ID,
+			"printer_name": printer.Name,
+			"printer_type": printer.PrinterType,
+			"status":       newStatus,
+			"filename":     status.Filename,
+			"progress":     status.Progress,
+			"time_left":    status.TimeLeft,
+			"temperatures": status.Temperatures,
+			"targets":      status.Targets,
+			"fan_speed":    status.FanSpeed,
 		},
 	})
+}
+
+func (p *Poller) getOrCreateProvider(printer db.Printer) PrinterProvider {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Check cache
+	if provider, ok := p.providers[printer.ID]; ok {
+		return provider
+	}
+
+	// Create provider based on printer type
+	var provider PrinterProvider
+
+	config := PrinterConfig{
+		PrinterID:   printer.ID,
+		Address:     printer.IPAddress,
+		Username:    printer.Username,
+		Password:    printer.Password,
+		AccessToken: printer.AccessToken,
+		Secret:      printer.Secret,
+		Extra:       make(map[string]string),
+	}
+
+	// Parse extra JSON if needed (simplified for now)
+	printerType := PrinterTypeMoonraker
+	if printer.PrinterType != "" {
+		printerType = PrinterType(printer.PrinterType)
+	}
+
+	switch printerType {
+	case PrinterTypeBambuLab:
+		config.PrinterType = PrinterTypeBambuLab
+		provider = NewBambuProvider(config)
+	case PrinterTypeMoonraker, PrinterTypeGeneric:
+		fallthrough
+	default:
+		config.PrinterType = PrinterTypeMoonraker
+		provider = NewMoonrakerProvider(config)
+	}
+
+	// Connect to printer
+	ctx := context.Background()
+	if err := provider.Connect(ctx); err != nil {
+		log.Printf("Failed to connect to printer %s: %v", printer.Name, err)
+		return nil
+	}
+
+	p.providers[printer.ID] = provider
+	return provider
 }
 
 func (p *Poller) markJobComplete(printerID int64) {
