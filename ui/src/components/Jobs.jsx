@@ -90,49 +90,56 @@ function Jobs() {
         {pendingJobs.length === 0 ? (
           <p className="p-4 text-gray-400">No pending jobs</p>
         ) : (
-          <table className="w-full">
-            <thead className="bg-gray-900 text-xs uppercase text-gray-400">
-              <tr>
-                <th className="px-4 py-2 text-left">Filename</th>
-                <th className="px-4 py-2 text-left">Model</th>
-                <th className="px-4 py-2 text-left">Filament</th>
-                <th className="px-4 py-2 text-left">Est. Time</th>
-                <th className="px-4 py-2 text-left">Created</th>
-                <th className="px-4 py-2 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pendingJobs.map(job => (
-                <tr key={job.id} className="border-t border-gray-700 hover:bg-gray-700/50">
-                  <td className="px-4 py-3 text-sm font-medium">{job.filename}</td>
-                  <td className="px-4 py-3 text-sm">
-                    <span className={`px-2 py-1 rounded ${
-                      getClusterForModel(job.printer_model) 
-                        ? 'bg-green-500/20 text-green-400' 
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+            {pendingJobs.map(job => (
+              <div key={job.id} className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
+                {job.thumbnail_url ? (
+                  <div className="h-32 bg-gray-800 overflow-hidden">
+                    <img
+                      src={job.thumbnail_url}
+                      alt={job.filename}
+                      className="w-full h-full object-cover"
+                      onError={(e) => { e.target.style.display = 'none'; }}
+                    />
+                  </div>
+                ) : (
+                  <div className="h-32 bg-gray-800 flex items-center justify-center text-gray-600">
+                    📄 No Preview
+                  </div>
+                )}
+                <div className="p-3">
+                  <h4 className="font-medium text-sm truncate" title={job.filename}>{job.filename}</h4>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded">
+                      ⏱️ {formatTime(job.estimated_time_s)}
+                    </span>
+                    {job.filament_weight_g > 0 && (
+                      <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded">
+                        🧵 {job.filament_weight_g.toFixed(1)}g
+                      </span>
+                    )}
+                    <span className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">
+                      {job.filament_type || 'Unknown'}
+                    </span>
+                  </div>
+                  <div className="mt-3 flex justify-between items-center">
+                    <span className={`px-2 py-1 rounded text-xs ${getClusterForModel(job.printer_model)
+                        ? 'bg-green-500/20 text-green-400'
                         : 'bg-red-500/20 text-red-400'
-                    }`}>
+                      }`}>
                       {job.printer_model}
                     </span>
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-300">{job.filament_type}</td>
-                  <td className="px-4 py-3 text-sm text-gray-400">
-                    {formatTime(job.estimated_time_s)}
-                  </td>
-                  <td className="px-4 py-3 text-sm text-gray-400">
-                    {new Date(job.created_at).toLocaleString()}
-                  </td>
-                  <td className="px-4 py-3 text-right">
                     <button
                       onClick={() => openAssignModal(job)}
-                      className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-sm transition-colors"
+                      className="px-3 py-1 bg-blue-600 hover:bg-blue-700 rounded text-xs transition-colors"
                     >
                       Assign
                     </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
@@ -158,9 +165,8 @@ function Jobs() {
                 <tr key={job.id} className="border-t border-gray-700 hover:bg-gray-700/50">
                   <td className="px-4 py-3 text-sm font-medium">{job.filename}</td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-1 rounded text-xs font-medium ${
-                      job.status === 'PRINTING' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
-                    }`}>
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${job.status === 'PRINTING' ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'
+                      }`}>
                       {job.status}
                     </span>
                   </td>
@@ -183,7 +189,7 @@ function Jobs() {
           <div className="bg-gray-800 rounded-xl p-6 w-full max-w-md border border-gray-700">
             <h3 className="text-xl font-bold mb-4">Assign Job</h3>
             <p className="text-gray-400 mb-4">{selectedJob.filename}</p>
-            
+
             <div className="space-y-4">
               <div>
                 <label className="block text-sm text-gray-400 mb-1">Cluster</label>

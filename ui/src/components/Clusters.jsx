@@ -11,8 +11,12 @@ function Clusters() {
   const [newClusterModel, setNewClusterModel] = useState('');
   const [newPrinterName, setNewPrinterName] = useState('');
   const [newPrinterIP, setNewPrinterIP] = useState('');
+  const [printerSerial, setPrinterSerial] = useState('');
+  const [accessCode, setAccessCode] = useState('');
   const [printerType, setPrinterType] = useState('MOONRAKER');
   const [unassignedModels, setUnassignedModels] = useState([]);
+  const [scanning, setScanning] = useState(false);
+  const [discoveredPrinters, setDiscoveredPrinters] = useState([]);
 
   useEffect(() => {
     loadData();
@@ -30,6 +34,24 @@ function Clusters() {
       setUnassignedModels(unassigned);
     } catch (err) {
       console.error('Failed to load clusters:', err);
+    }
+  }
+
+  async function handleScanNetwork() {
+    setScanning(true);
+    try {
+      const result = await api.scanNetwork();
+      if (result.printers && result.printers.length > 0) {
+        setDiscoveredPrinters(result.printers);
+        // Auto-fill first discovered printer
+        const first = result.printers[0];
+        setNewPrinterIP(first.ip_address || '');
+        setPrinterSerial(first.serial || '');
+      }
+    } catch (err) {
+      alert('Network scan failed: ' + err.message);
+    } finally {
+      setScanning(false);
     }
   }
 
@@ -122,8 +144,8 @@ function Clusters() {
                 <button
                   onClick={() => handleToggleCluster(cluster.id, cluster.isEnabled)}
                   className={`px-3 py-1 rounded text-sm transition-colors ${cluster.isEnabled
-                      ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-                      : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
+                    ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                    : 'bg-gray-500/20 text-gray-400 hover:bg-gray-500/30'
                     }`}
                 >
                   {cluster.isEnabled ? '● Enabled' : '○ Disabled'}
@@ -329,14 +351,54 @@ function Clusters() {
 
                 <div>
                   <label className="block text-sm text-gray-400 mb-1">IP Address / Hostname</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newPrinterIP}
+                      onChange={(e) => setNewPrinterIP(e.target.value)}
+                      className="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-2"
+                      placeholder="e.g., 192.168.1.100"
+                    />
+                    <button
+                      onClick={handleScanNetwork}
+                      disabled={scanning}
+                      className="px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded transition-colors text-sm"
+                      title="Scan network for printers"
+                    >
+                      {scanning ? '🔍' : '🔍 Scan'}
+                    </button>
+                  </div>
+                  {discoveredPrinters.length > 0 && (
+                    <div className="mt-2 text-xs text-green-400">
+                      Found: {discoveredPrinters.length} printer(s) - Auto-filled
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Serial Number</label>
                   <input
                     type="text"
-                    value={newPrinterIP}
-                    onChange={(e) => setNewPrinterIP(e.target.value)}
+                    value={printerSerial}
+                    onChange={(e) => setPrinterSerial(e.target.value.toUpperCase())}
                     className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2"
-                    placeholder="e.g., 192.168.1.100 or printer1.local"
+                    placeholder="e.g., ABC123456"
                   />
-                  <p className="text-xs text-gray-500 mt-1">Moonraker should be accessible at this address</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm text-gray-400 mb-1">Access Code (8 chars)</label>
+                  <input
+                    type="text"
+                    value={accessCode}
+                    onChange={(e) => setAccessCode(e.target.value.toUpperCase())}
+                    className="w-full bg-gray-900 border border-gray-600 rounded px-3 py-2 tracking-widest"
+                    placeholder="ABCDEFGH"
+                    maxLength="8"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    For Bambu Lab: Settings → About → Access Code
+                  </p>
                 </div>
 
                 <div className="flex gap-3">
@@ -347,11 +409,21 @@ function Clusters() {
                         return;
                       }
                       try {
-                        await api.addPrinter(selectedCluster.id, newPrinterName, newPrinterIP, 'MOONRAKER');
+                        await api.addPrinter(
+                          selectedCluster.id,
+                          newPrinterName,
+                          newPrinterIP,
+                          printerType,
+                          printerSerial,
+                          accessCode
+                        );
                         setNewPrinterName('');
                         setNewPrinterIP('');
+                        setPrinterSerial('');
+                        setAccessCode('');
                         setShowAddPrinterModal(false);
                         setSelectedCluster(null);
+                        setDiscoveredPrinters([]);
                         loadData();
                       } catch (err) {
                         alert('Failed to add printer: ' + err.message);
@@ -367,6 +439,9 @@ function Clusters() {
                       setSelectedCluster(null);
                       setNewPrinterName('');
                       setNewPrinterIP('');
+                      setPrinterSerial('');
+                      setAccessCode('');
+                      setDiscoveredPrinters([]);
                     }}
                     className="px-4 py-2 bg-gray-600 hover:bg-gray-700 rounded transition-colors"
                   >

@@ -82,7 +82,7 @@ export const api = {
   },
 
   // Printers
-  async addPrinter(clusterId, name, ipAddress, printerType = 'MOONRAKER', credentials = {}) {
+  async addPrinter(clusterId, name, ipAddress, printerType = 'MOONRAKER', serial = '', accessCode = '', credentials = {}) {
     const res = await fetch(`${API_BASE}/api/printers/add`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -91,6 +91,8 @@ export const api = {
         name,
         ip_address: ipAddress,
         printer_type: printerType,
+        serial: serial,
+        access_code: accessCode,
         ...credentials
       }),
     });
@@ -107,6 +109,35 @@ export const api = {
   async getPrinterStatus(id) {
     const res = await fetch(`${API_BASE}/api/printers/status?id=${id}`);
     if (!res.ok) throw new Error('Failed to get printer status');
+    return res.json();
+  },
+
+  async scanNetwork() {
+    const res = await fetch(`${API_BASE}/api/scanner/discover`);
+    if (!res.ok) throw new Error('Network scan failed');
+    return res.json();
+  },
+
+  // Filament Spools
+  async getSpools() {
+    const res = await fetch(`${API_BASE}/api/spools`);
+    if (!res.ok) throw new Error('Failed to get spools');
+    return res.json();
+  },
+
+  async addSpool(material, color, colorHex, totalWeight, assignedTo) {
+    const res = await fetch(`${API_BASE}/api/spools`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        material,
+        color,
+        color_hex: colorHex,
+        total_weight_g: totalWeight,
+        assigned_printer_id: assignedTo,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed to add spool');
     return res.json();
   },
 
@@ -141,6 +172,22 @@ export const api = {
   },
 
   // Bambu Lab Cloud API
+  async bambuGetLoginURL() {
+    const res = await fetch(`${API_BASE}/api/bambu/login-url`);
+    if (!res.ok) throw new Error('Failed to get login URL');
+    return res.json();
+  },
+
+  async bambuTokenLogin(credentials) {
+    const res = await fetch(`${API_BASE}/api/bambu/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentials),
+    });
+    if (!res.ok) throw new Error('Failed to save token');
+    return res.json();
+  },
+
   async bambuLogin(email, password, region) {
     const res = await fetch(`${API_BASE}/api/bambu/login`, {
       method: 'POST',
@@ -191,6 +238,16 @@ export const api = {
       method: 'DELETE',
     });
     if (!res.ok) throw new Error('Failed to delete account');
+    return res.json();
+  },
+
+  // Network Scanner
+  async scannerDiscover(subnet) {
+    const url = subnet
+      ? `${API_BASE}/api/scanner/discover?subnet=${encodeURIComponent(subnet)}`
+      : `${API_BASE}/api/scanner/discover`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Network scan failed');
     return res.json();
   },
 };
