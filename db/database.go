@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"log"
 	"nexus-hub-core/api"
 	"time"
 
@@ -19,6 +20,8 @@ type PrintJob struct {
 	Filament        string     `json:"filament_type"`
 	PrinterModel    string     `json:"printer_model"`
 	EstimatedTimeS  uint64     `json:"estimated_time_s"`
+	FilamentWeight  float32    `json:"filament_weight_g"`
+	ThumbnailURL    string     `json:"thumbnail_url"`
 	Status          string     `json:"status"`
 	TargetClusterID int64      `json:"target_cluster_id"`
 	TargetPrinterID int64      `json:"target_printer_id"`
@@ -71,31 +74,48 @@ type Cluster struct {
 
 // Printer represents a 3D printer
 type Printer struct {
-	ID          int64     `json:"id"`
-	ClusterID   int64     `json:"cluster_id"`
-	Name        string    `json:"name"`
-	IPAddress   string    `json:"ip_address"`
-	Status      string    `json:"status"`
-	PrinterType string    `json:"printer_type"` // MOONRAKER, BAMBULAB, etc.
-	Username    string    `json:"username,omitempty"`
-	Password    string    `json:"password,omitempty"`
-	AccessToken string    `json:"access_token,omitempty"`
-	Secret      string    `json:"secret,omitempty"`
-	Extra       string    `json:"extra,omitempty"` // JSON-encoded vendor-specific config
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64      `json:"id"`
+	ClusterID   int64      `json:"cluster_id"`
+	Name        string     `json:"name"`
+	IPAddress   string     `json:"ip_address"`
+	Status      string     `json:"status"`
+	PrinterType string     `json:"printer_type"`          // MOONRAKER, BAMBULAB, etc.
+	Serial      string     `json:"serial,omitempty"`      // Bambu serial number
+	AccessCode  string     `json:"access_code,omitempty"` // Bambu LAN access code
+	Username    string     `json:"username,omitempty"`
+	Password    string     `json:"password,omitempty"`
+	AccessToken string     `json:"access_token,omitempty"`
+	Secret      string     `json:"secret,omitempty"`
+	Extra       string     `json:"extra,omitempty"` // JSON-encoded vendor-specific config
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
+}
+
+// FilamentSpool represents a filament spool in inventory
+type FilamentSpool struct {
+	ID          int64   `json:"id"`
+	Material    string  `json:"material"` // PLA, PETG, ABS, etc.
+	Color       string  `json:"color"`    // Color name
+	ColorHex    string  `json:"color_hex"`
+	TotalWeight float32 `json:"total_weight_g"`
+	Remaining   float32 `json:"remaining_weight_g"`
+	AssignedTo  int64   `json:"assigned_printer_id"`
+	PrinterName string  `json:"printer_name,omitempty"`
 }
 
 // BambuAccount represents a saved Bambu Lab cloud account
 type BambuAccount struct {
 	ID           int64     `json:"id"`
 	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"` // Encrypted password
+	Username     string    `json:"username"`
+	UID          string    `json:"uid"`
+	PasswordHash string    `json:"-"` // Encrypted password (legacy)
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
 	TokenExpiry  time.Time `json:"token_expiry"`
 	Region       string    `json:"region"` // US, EU, CN
 	TFAEnabled   bool      `json:"tfa_enabled"`
-	TFASecret    string    `json:"-"` // Encrypted TFA secret
+	TFASecret    string    `json:"-"`           // Encrypted TFA secret
+	AuthMethod   string    `json:"auth_method"` // TOKEN, PASSWORD, OAUTH
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -148,6 +168,8 @@ func (d *Database) setupTables() error {
 			ip_address TEXT NOT NULL,
 			status TEXT DEFAULT 'IDLE',
 			printer_type TEXT DEFAULT 'MOONRAKER',
+			serial TEXT,
+			access_code TEXT,
 			username TEXT,
 			password TEXT,
 			access_token TEXT,
@@ -167,7 +189,20 @@ func (d *Database) setupTables() error {
 			target_printer_id INTEGER DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			started_at DATETIME,
-			completed_at DATETIME
+			completed_at DATETIME,
+			thumbnail_url TEXT,
+			filament_weight_g REAL
+		)`,
+		`CREATE TABLE IF NOT EXISTS spools (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			material TEXT NOT NULL,
+			color TEXT NOT NULL,
+			color_hex TEXT DEFAULT '#FFFFFF',
+			total_weight_g REAL NOT NULL,
+			remaining_weight_g REAL NOT NULL,
+			assigned_printer_id INTEGER DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(assigned_printer_id) REFERENCES printers(id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS print_history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,10 +267,10 @@ func (d *Database) AddPrintJob(filename, filament, printerModel string, timeS ui
 
 func (d *Database) GetPendingJobs() ([]PrintJob, error) {
 	rows, err := d.Conn.Query(`
-		SELECT id, filename, filament_type, printer_model, estimated_time_s, status, 
-		       target_cluster_id, target_printer_id, created_at, started_at, completed_at 
-		FROM print_jobs 
-		WHERE status = 'PENDING' 
+		SELECT id, filename, filament_type, printer_model, estimated_time_s, filament_weight_g, thumbnail_url, status,
+		       target_cluster_id, target_printer_id, created_at, started_at, completed_at
+		FROM print_jobs
+		WHERE status = 'PENDING'
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -247,8 +282,8 @@ func (d *Database) GetPendingJobs() ([]PrintJob, error) {
 	for rows.Next() {
 		var j PrintJob
 		if err := rows.Scan(&j.ID, &j.Filename, &j.Filament, &j.PrinterModel,
-			&j.EstimatedTimeS, &j.Status, &j.TargetClusterID, &j.TargetPrinterID,
-			&j.CreatedAt, &j.StartedAt, &j.CompletedAt); err == nil {
+			&j.EstimatedTimeS, &j.FilamentWeight, &j.ThumbnailURL, &j.Status,
+			&j.TargetClusterID, &j.TargetPrinterID, &j.CreatedAt, &j.StartedAt, &j.CompletedAt); err == nil {
 			jobs = append(jobs, j)
 		}
 	}
@@ -257,10 +292,10 @@ func (d *Database) GetPendingJobs() ([]PrintJob, error) {
 
 func (d *Database) GetJobList() ([]PrintJob, error) {
 	rows, err := d.Conn.Query(`
-		SELECT id, filename, filament_type, printer_model, estimated_time_s, status, 
-		       target_cluster_id, target_printer_id, created_at, started_at, completed_at 
-		FROM print_jobs 
-		WHERE status IN ('ASSIGNED', 'PRINTING') 
+		SELECT id, filename, filament_type, printer_model, estimated_time_s, filament_weight_g, thumbnail_url, status,
+		       target_cluster_id, target_printer_id, created_at, started_at, completed_at
+		FROM print_jobs
+		WHERE status IN ('ASSIGNED', 'PRINTING')
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -272,8 +307,8 @@ func (d *Database) GetJobList() ([]PrintJob, error) {
 	for rows.Next() {
 		var j PrintJob
 		if err := rows.Scan(&j.ID, &j.Filename, &j.Filament, &j.PrinterModel,
-			&j.EstimatedTimeS, &j.Status, &j.TargetClusterID, &j.TargetPrinterID,
-			&j.CreatedAt, &j.StartedAt, &j.CompletedAt); err == nil {
+			&j.EstimatedTimeS, &j.FilamentWeight, &j.ThumbnailURL, &j.Status,
+			&j.TargetClusterID, &j.TargetPrinterID, &j.CreatedAt, &j.StartedAt, &j.CompletedAt); err == nil {
 			jobs = append(jobs, j)
 		}
 	}
@@ -532,19 +567,29 @@ func (d *Database) GetClustersWithPrinters() ([]Cluster, error) {
 
 	for i := range clusters {
 		pRows, err := d.Conn.Query(`
-			SELECT id, cluster_id, name, ip_address, status, printer_type, 
-			       username, password, access_token, secret, extra, created_at 
+			SELECT id, cluster_id, name, ip_address, status, printer_type, serial, access_code,
+			       COALESCE(username, ''), COALESCE(password, ''), COALESCE(access_token, ''), 
+			       COALESCE(secret, ''), COALESCE(extra, ''), COALESCE(created_at, '')
 			FROM printers WHERE cluster_id = ?
 		`, clusters[i].ID)
 		if err != nil {
+			log.Printf("Failed to query printers for cluster %d: %v", clusters[i].ID, err)
 			continue
 		}
 		for pRows.Next() {
 			var p Printer
+			var createdAtStr string
 			if err := pRows.Scan(&p.ID, &p.ClusterID, &p.Name, &p.IPAddress, &p.Status,
-				&p.PrinterType, &p.Username, &p.Password, &p.AccessToken, &p.Secret,
-				&p.Extra, &p.CreatedAt); err == nil {
+				&p.PrinterType, &p.Serial, &p.AccessCode, &p.Username, &p.Password,
+				&p.AccessToken, &p.Secret, &p.Extra, &createdAtStr); err == nil {
+				if createdAtStr != "" {
+					if t, err := time.Parse(time.RFC3339, createdAtStr); err == nil {
+						p.CreatedAt = &t
+					}
+				}
 				clusters[i].Printers = append(clusters[i].Printers, p)
+			} else {
+				log.Printf("Failed to scan printer row: %v", err)
 			}
 		}
 		pRows.Close()
@@ -552,11 +597,11 @@ func (d *Database) GetClustersWithPrinters() ([]Cluster, error) {
 	return clusters, nil
 }
 
-func (d *Database) AddPrinter(clusterID int64, name, ip, printerType, username, password, accessToken, secret, extra string) error {
+func (d *Database) AddPrinter(clusterID int64, name, ip, printerType, serial, accessCode, username, password, accessToken, secret, extra string) error {
 	_, err := d.Conn.Exec(`
-		INSERT INTO printers (cluster_id, name, ip_address, printer_type, username, password, access_token, secret, extra) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, clusterID, name, ip, printerType, username, password, accessToken, secret, extra)
+		INSERT INTO printers (cluster_id, name, ip_address, printer_type, serial, access_code, username, password, access_token, secret, extra)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, clusterID, name, ip, printerType, serial, accessCode, username, password, accessToken, secret, extra)
 	return err
 }
 
@@ -653,15 +698,32 @@ func (d *Database) GetSystemAnalytics() (map[string]interface{}, error) {
 
 func (d *Database) SaveBambuAccount(email, passwordHash, accessToken, refreshToken, region string, tokenExpiry time.Time) error {
 	_, err := d.Conn.Exec(`
-		INSERT INTO bambu_accounts (email, password_hash, access_token, refresh_token, token_expiry, region, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO bambu_accounts (email, password_hash, access_token, refresh_token, token_expiry, region, auth_method, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'PASSWORD', CURRENT_TIMESTAMP)
 		ON CONFLICT(email) DO UPDATE SET
 			access_token = excluded.access_token,
 			refresh_token = excluded.refresh_token,
 			token_expiry = excluded.token_expiry,
 			region = excluded.region,
+			auth_method = excluded.auth_method,
 			updated_at = CURRENT_TIMESTAMP
 	`, email, passwordHash, accessToken, refreshToken, tokenExpiry)
+	return err
+}
+
+// SaveBambuTokenAccount saves a Bambu account using token-based authentication
+func (d *Database) SaveBambuTokenAccount(email, username, uid, accessToken, region string) error {
+	_, err := d.Conn.Exec(`
+		INSERT INTO bambu_accounts (email, username, uid, access_token, region, auth_method, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 'TOKEN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(email) DO UPDATE SET
+			username = excluded.username,
+			uid = excluded.uid,
+			access_token = excluded.access_token,
+			region = excluded.region,
+			auth_method = excluded.auth_method,
+			updated_at = CURRENT_TIMESTAMP
+	`, email, username, uid, accessToken, region)
 	return err
 }
 
@@ -754,4 +816,58 @@ func (d *Database) ListBambuAccounts() ([]BambuAccount, error) {
 		}
 	}
 	return accounts, nil
+}
+
+// --- Filament Spool Methods ---
+
+func (d *Database) AddSpool(material, color, colorHex string, totalWeight, remaining float32, assignedTo int64) error {
+	_, err := d.Conn.Exec(`
+		INSERT INTO spools (material, color, color_hex, total_weight_g, remaining_weight_g, assigned_printer_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, material, color, colorHex, totalWeight, remaining, assignedTo)
+	return err
+}
+
+func (d *Database) GetSpools() ([]FilamentSpool, error) {
+	rows, err := d.Conn.Query(`
+		SELECT s.id, s.material, s.color, s.color_hex, s.total_weight_g, s.remaining_weight_g,
+		       s.assigned_printer_id, p.name
+		FROM spools s
+		LEFT JOIN printers p ON s.assigned_printer_id = p.id
+		ORDER BY s.id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	spools := []FilamentSpool{}
+	for rows.Next() {
+		var s FilamentSpool
+		var printerName sql.NullString
+		if err := rows.Scan(&s.ID, &s.Material, &s.Color, &s.ColorHex, &s.TotalWeight,
+			&s.Remaining, &s.AssignedTo, &printerName); err == nil {
+			if printerName.Valid {
+				s.PrinterName = printerName.String
+			}
+			spools = append(spools, s)
+		}
+	}
+	return spools, nil
+}
+
+func (d *Database) DeductFilament(printerID int64, weightGrams float32) error {
+	_, err := d.Conn.Exec(`
+		UPDATE spools
+		SET remaining_weight_g = MAX(0, remaining_weight_g - ?)
+		WHERE assigned_printer_id = ?
+	`, weightGrams, printerID)
+	return err
+}
+
+func (d *Database) UpdateJobMetadata(jobID int64, thumbnailURL string, filamentWeight float32) error {
+	_, err := d.Conn.Exec(`
+		UPDATE print_jobs SET thumbnail_url = ?, filament_weight_g = ? WHERE id = ?
+	`, thumbnailURL, filamentWeight, jobID)
+	return err
 }

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // BambuLab API endpoints
@@ -63,6 +65,9 @@ type BambuProvider struct {
 
 	// Last known status
 	lastStatus *PrinterStatus
+
+	// MQTT client for LAN mode
+	mqttClient mqtt.Client
 }
 
 // BambuAuthRequest is the login request payload
@@ -117,6 +122,26 @@ type BambuStatusResponse struct {
 		TargetBed    string `json:"bed_target_temper"`
 		FanSpeed     string `json:"cooling_fan_speed"`
 		SpeedLevel   int    `json:"spd_lvl"`
+	} `json:"print"`
+}
+
+// BambuReport represents an MQTT report message
+type BambuReport struct {
+	Print struct {
+		State        string `json:"gcode_state"`
+		Progress     string `json:"mc_percent"`
+		Remaining    string `json:"mc_remaining_time"`
+		Layer        string `json:"layer_num"`
+		TotalLayers  string `json:"layer_total"`
+		File         string `json:"gcode_file"`
+		NozzleTemp   string `json:"nozzle_temper"`
+		BedTemp      string `json:"bed_temper"`
+		TargetNozzle string `json:"nozzle_target_temper"`
+		TargetBed    string `json:"bed_target_temper"`
+		FanSpeed     string `json:"cooling_fan_speed"`
+		SpeedLevel   int    `json:"spd_lvl"`
+		Command      string `json:"command"`
+		SequenceID   string `json:"sequence_id"`
 	} `json:"print"`
 }
 
@@ -199,20 +224,23 @@ func (b *BambuProvider) Connect(ctx context.Context) error {
 	b.logDebug("Connecting in %s mode", b.mode)
 
 	if b.mode == BambuModeLAN {
-		// LAN mode - just test connection
+		// LAN mode - use MQTT connection (like bambu-ping.go)
 		if b.config.Extra["local_ip"] == "" {
 			return fmt.Errorf("LAN mode requires local_ip in config")
 		}
 		if b.config.Extra["access_code"] == "" {
 			return fmt.Errorf("LAN mode requires access_code in config")
 		}
-
-		// Test connection
-		_, err := b.getLocalStatus(ctx)
-		if err != nil {
-			return fmt.Errorf("LAN connection test failed: %w", err)
+		if b.printerSerial == "" {
+			return fmt.Errorf("LAN mode requires serial in config")
 		}
-		b.logDebug("LAN connection successful")
+
+		// Test MQTT connection
+		err := b.connectMQTT(ctx)
+		if err != nil {
+			return fmt.Errorf("MQTT connection failed: %w", err)
+		}
+		b.logDebug("MQTT connection successful")
 	} else {
 		// Cloud mode - authenticate
 		if err := b.authenticate(ctx); err != nil {
@@ -229,6 +257,48 @@ func (b *BambuProvider) Connect(ctx context.Context) error {
 	}
 
 	b.connected = true
+	return nil
+}
+
+// connectMQTT establishes MQTT connection to Bambu printer (LAN mode)
+func (b *BambuProvider) connectMQTT(ctx context.Context) error {
+	ip := b.config.Extra["local_ip"]
+	accessCode := b.config.Extra["access_code"]
+	serial := b.printerSerial
+
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(fmt.Sprintf("tcps://%s:8883", ip))
+	opts.SetClientID(fmt.Sprintf("nexus-hub-%s", serial))
+	opts.SetUsername("bblp")
+	opts.SetPassword(accessCode)
+	opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: true})
+	opts.SetAutoReconnect(true)
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(5 * time.Second)
+
+	// Set message handler to update status
+	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+		b.handleMQTTMessage(msg.Payload())
+	})
+
+	client := mqtt.NewClient(opts)
+
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to connect: %v", token.Error())
+	}
+
+	// Subscribe to report topic
+	reportTopic := fmt.Sprintf("device/%s/report", serial)
+	if token := client.Subscribe(reportTopic, 1, nil); token.Wait() && token.Error() != nil {
+		return fmt.Errorf("failed to subscribe: %v", token.Error())
+	}
+
+	b.mqttClient = client
+	b.logDebug("MQTT connected and subscribed to %s", reportTopic)
+
+	// Wait a moment for initial status message
+	time.Sleep(500 * time.Millisecond)
+
 	return nil
 }
 
@@ -480,21 +550,132 @@ func (b *BambuProvider) IsConnected() bool {
 	return b.connected
 }
 
-// GetStatus fetches current printer status
+// GetStatus returns current printer status from MQTT cache
 func (b *BambuProvider) GetStatus(ctx context.Context) (*PrinterStatus, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Try local API first if in LAN mode or local_ip is configured
-	if b.mode == BambuModeLAN || b.config.Extra["local_ip"] != "" {
-		if status, err := b.getLocalStatus(ctx); err == nil {
-			b.lastStatus = status
-			return status, nil
+	// For LAN mode, return cached status from MQTT messages
+	if b.mode == BambuModeLAN {
+		if b.lastStatus == nil {
+			// No status yet, return idle status
+			return &PrinterStatus{
+				State:        "idle",
+				Temperatures: make(map[string]float32),
+				Targets:      make(map[string]float32),
+			}, nil
+		}
+		return b.lastStatus, nil
+	}
+
+	// Fall back to cloud API for cloud mode
+	return b.getCloudStatus(ctx)
+}
+
+// handleMQTTMessage processes incoming MQTT messages and updates status
+func (b *BambuProvider) handleMQTTMessage(payload []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Bambu sends nested JSON: {"print": {...}}
+	// Temperature values can be numbers or strings
+	var msg struct {
+		Print struct {
+			State        string        `json:"gcode_state"`
+			Progress     interface{}   `json:"mc_percent"`
+			Remaining    interface{}   `json:"mc_remaining_time"`
+			Layer        interface{}   `json:"layer_num"`
+			TotalLayers  interface{}   `json:"layer_total"`
+			File         string        `json:"gcode_file"`
+			NozzleTemp   interface{}   `json:"nozzle_temper"`
+			BedTemp      interface{}   `json:"bed_temper"`
+			TargetNozzle interface{}   `json:"nozzle_target_temper"`
+			TargetBed    interface{}   `json:"bed_target_temper"`
+			FanSpeed     interface{}   `json:"cooling_fan_speed"`
+			SpeedLevel   int           `json:"spd_lvl"`
+			Command      string        `json:"command"`
+			SequenceID   string        `json:"sequence_id"`
+			PrintError   int           `json:"print_error"`
+			Hms          []interface{} `json:"hms"`
+		} `json:"print"`
+	}
+
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		b.logDebug("Failed to parse MQTT message: %v", err)
+		return
+	}
+
+	// Helper to parse interface{} to float32
+	parseFloat := func(v interface{}) float32 {
+		switch val := v.(type) {
+		case float64:
+			return float32(val)
+		case int:
+			return float32(val)
+		case string:
+			var f float32
+			fmt.Sscanf(val, "%f", &f)
+			return f
+		default:
+			return 0
 		}
 	}
 
-	// Fall back to cloud API
-	return b.getCloudStatus(ctx)
+	// Helper to parse interface{} to int
+	parseInt := func(v interface{}) int {
+		switch val := v.(type) {
+		case float64:
+			return int(val)
+		case int:
+			return val
+		case string:
+			var i int
+			fmt.Sscanf(val, "%d", &i)
+			return i
+		default:
+			return 0
+		}
+	}
+
+	// Parse values
+	nozzleTemp := parseFloat(msg.Print.NozzleTemp)
+	bedTemp := parseFloat(msg.Print.BedTemp)
+	targetNozzle := parseFloat(msg.Print.TargetNozzle)
+	targetBed := parseFloat(msg.Print.TargetBed)
+	fanSpeed := parseFloat(msg.Print.FanSpeed)
+	progress := parseFloat(msg.Print.Progress)
+	timeLeft := int64(parseFloat(msg.Print.Remaining))
+	layer := parseInt(msg.Print.Layer)
+	totalLayers := parseInt(msg.Print.TotalLayers)
+
+	// Map state string
+	state := msg.Print.State
+	if state == "" {
+		state = "idle"
+	}
+
+	status := &PrinterStatus{
+		State:       state,
+		Filename:    msg.Print.File,
+		Progress:    progress,
+		TimeLeft:    timeLeft,
+		Layer:       layer,
+		TotalLayers: totalLayers,
+		Temperatures: map[string]float32{
+			"nozzle": nozzleTemp,
+			"bed":    bedTemp,
+		},
+		Targets: map[string]float32{
+			"nozzle": targetNozzle,
+			"bed":    targetBed,
+		},
+		FanSpeed:   fanSpeed,
+		SpeedLevel: msg.Print.SpeedLevel,
+	}
+
+	b.lastStatus = status
+	b.logDebug("Status: %s | Progress: %.1f%% | Nozzle: %.1f/%.1f°C | Bed: %.1f/%.1f°C",
+		state, progress, nozzleTemp, targetNozzle, bedTemp, targetBed)
 }
 
 // getLocalStatus fetches status from local network HTTP API

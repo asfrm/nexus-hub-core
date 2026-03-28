@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,12 +13,18 @@ import (
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
 	"nexus-hub-core/moonraker"
+	"nexus-hub-core/parser"
 	"nexus-hub-core/printer"
+	"nexus-hub-core/printer/bambu"
+	"nexus-hub-core/scanner"
 	"nexus-hub-core/slicer"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
@@ -26,6 +33,37 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 	// --- 1. SERVICE ROUTES ---
 	mux.HandleFunc("/server/files/upload", slicer.UploadGCodeHandler(database, hub))
 	mux.HandleFunc("/ws", HandleWS(hub))
+
+	// --- 1.5 SLICER GRABBER API (OctoPrint-compatible) ---
+	mux.HandleFunc("/api/files/local", handleSlicerUpload(database, hub))
+
+	// --- 1.6 HEALTH CHECK ---
+	startTime := time.Now()
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		health := map[string]interface{}{
+			"status":    "healthy",
+			"timestamp": time.Now().Format(time.RFC3339),
+			"version":   "2.0.3",
+			"uptime":    time.Since(startTime).String(),
+			"database":  "connected",
+			"printers":  0,
+		}
+
+		// Check database
+		if err := database.Conn.Ping(); err != nil {
+			health["database"] = "disconnected"
+			health["status"] = "degraded"
+		}
+
+		// Count printers
+		clusters, _ := database.GetClustersWithPrinters()
+		for _, c := range clusters {
+			health["printers"] = health["printers"].(int) + len(c.Printers)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(health)
+	})
 
 	// --- 1.5 NEW: Completed Jobs ---
 	mux.HandleFunc("/api/jobs/completed", func(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +169,39 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(wearStats)
+	})
+
+	// --- 1.11 NEW: Filament Spools ---
+	mux.HandleFunc("/api/spools", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			spools, err := database.GetSpools()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(spools)
+
+		case "POST":
+			var req struct {
+				Material    string  `json:"material"`
+				Color       string  `json:"color"`
+				ColorHex    string  `json:"color_hex"`
+				TotalWeight float32 `json:"total_weight_g"`
+				AssignedTo  int64   `json:"assigned_printer_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Bad JSON", http.StatusBadRequest)
+				return
+			}
+			if err := database.AddSpool(req.Material, req.Color, req.ColorHex, req.TotalWeight, req.TotalWeight, req.AssignedTo); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]bool{"success": true})
+		}
 	})
 
 	// --- 2. VAULT & JOB LIST (Queues) ---
@@ -304,6 +375,8 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			Name        string `json:"name"`
 			IP          string `json:"ip_address"`
 			PrinterType string `json:"printer_type"`
+			Serial      string `json:"serial"`      // Bambu serial (manual fallback)
+			AccessCode  string `json:"access_code"` // Bambu 8-char code (manual fallback)
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			AccessToken string `json:"access_token"`
@@ -313,10 +386,11 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			http.Error(w, "Bad JSON", http.StatusBadRequest)
 			return
 		}
-		if err := database.AddPrinter(req.ClusterID, req.Name, req.IP, req.PrinterType, req.Username, req.Password, req.AccessToken, "", req.Extra); err != nil {
+		if err := database.AddPrinter(req.ClusterID, req.Name, req.IP, req.PrinterType, req.Serial, req.AccessCode, req.Username, req.Password, req.AccessToken, "", req.Extra); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		log.Printf("[API] Added printer: %s (%s) at %s", req.Name, req.Serial, req.IP)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"success": true})
 	})
@@ -338,19 +412,45 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		for _, c := range clusters {
 			for _, p := range c.Printers {
 				if p.ID == id {
-					go func(printerIP string) {
-						if err := moonraker.SendCommand(printerIP, action); err != nil {
-							hub.Send(api.NexusPacket{
-								EventType: "SYSTEM_LOG",
-								Log: &api.LogPayload{
-									Module:    "WEB",
-									Level:     "ERROR",
-									Message:   fmt.Sprintf("Failed to send command '%s' to printer: %v", action, err),
-									Timestamp: time.Now(),
-								},
-							})
-						}
-					}(p.IPAddress)
+					// HARDWARE SAFETY LOCK: Check if printer is printing before sending G-code
+					if action == "g28" && (p.Status == "PRINTING" || p.Status == "PAUSED") {
+						hub.Send(api.NexusPacket{
+							EventType: "SYSTEM_LOG",
+							Log: &api.LogPayload{
+								Module:    "WEB",
+								Level:     "ERROR",
+								Message:   fmt.Sprintf("Hardware safety lock: Cannot home while printing (status: %s)", p.Status),
+								Timestamp: time.Now(),
+							},
+						})
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						json.NewEncoder(w).Encode(map[string]string{
+							"error":  "Cannot send G-code while printer is printing or paused",
+							"status": p.Status,
+						})
+						return
+					}
+
+					if p.PrinterType == "BAMBULAB" {
+						// Use MQTT for Bambu printers
+						go sendBambuCommand(p, action, hub)
+					} else {
+						// Use HTTP for Moonraker
+						go func(printerIP string) {
+							if err := moonraker.SendCommand(printerIP, action); err != nil {
+								hub.Send(api.NexusPacket{
+									EventType: "SYSTEM_LOG",
+									Log: &api.LogPayload{
+										Module:    "WEB",
+										Level:     "ERROR",
+										Message:   fmt.Sprintf("Failed to send command '%s' to printer: %v", action, err),
+										Timestamp: time.Now(),
+									},
+								})
+							}
+						}(p.IPAddress)
+					}
 				}
 			}
 		}
@@ -411,9 +511,104 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 	// --- 6. BAMBU LAB CLOUD API ---
 
-	// Bambu Login
+	// Bambu Login URL (for OAuth-style flow)
+	mux.HandleFunc("/api/bambu/login-url", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu login URL requested")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"login_url":    bambu.GetLoginURL(),
+			"instructions": "1. Click the URL to open Bambu Lab login page\n2. After logging in, go to your profile\n3. Copy your 'User Access Token'\n4. Use the /api/bambu/token endpoint with the token",
+		})
+	})
+
+	// Bambu Token-based Login (OAuth-style)
+	mux.HandleFunc("/api/bambu/token", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu token login request received")
+
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Email       string `json:"email"`
+			Username    string `json:"username"`
+			UID         string `json:"uid"`
+			AccessToken string `json:"access_token"`
+			Region      string `json:"region"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("[API DEBUG] Bambu token: Bad JSON - %v", err)
+			http.Error(w, "Bad JSON", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu token: Saving token account for user: %s (uid: %s)", req.Email, req.UID)
+
+		// Save account with token
+		err := database.SaveBambuTokenAccount(req.Email, req.Username, req.UID, req.AccessToken, req.Region)
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu token: Failed to save account - %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu token: Account saved successfully")
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Token saved successfully",
+		})
+	})
+
+	// Bambu Callback (for OAuth redirect)
+	mux.HandleFunc("/api/bambu/callback", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Bambu callback received")
+
+		token := r.URL.Query().Get("token")
+		uid := r.URL.Query().Get("uid")
+		username := r.URL.Query().Get("username")
+		email := r.URL.Query().Get("email")
+		region := r.URL.Query().Get("region")
+
+		if token == "" {
+			http.Error(w, "Token required", http.StatusBadRequest)
+			return
+		}
+
+		log.Printf("[API DEBUG] Bambu callback: Saving account from OAuth callback")
+
+		err := database.SaveBambuTokenAccount(email, username, uid, token, region)
+		if err != nil {
+			log.Printf("[API DEBUG] Bambu callback: Failed to save account - %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Redirect to success page
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`
+			<!DOCTYPE html>
+			<html>
+			<head>
+				<title>Authentication Successful</title>
+				<script>
+					window.opener.postMessage({ success: true, email: '` + email + `' }, '*');
+					window.close();
+				</script>
+			</head>
+			<body>
+				<h1>Authentication Successful!</h1>
+				<p>You can close this window and return to the application.</p>
+			</body>
+			</html>
+		`))
+	})
+
+	// Bambu Legacy Password Login (still supported)
 	mux.HandleFunc("/api/bambu/login", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[API DEBUG] Bambu login request received")
+		log.Printf("[API DEBUG] Bambu legacy password login request received")
 		if r.Method != "POST" {
 			log.Printf("[API DEBUG] Bambu login: Method not allowed")
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -574,6 +769,29 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		})
 	})
 
+	// Network Scanner - Discover Printers
+	mux.HandleFunc("/api/scanner/discover", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[API DEBUG] Network scanner discover request received")
+
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		printers, err := scanner.Discover(ctx)
+		if err != nil {
+			log.Printf("[API DEBUG] Network scanner: Scan failed - %v", err)
+			http.Error(w, "Scan failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[API DEBUG] Network scanner: Found %d printers", len(printers))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  true,
+			"printers": printers,
+		})
+	})
+
 	// Bambu Bind Printer
 	mux.HandleFunc("/api/bambu/bind", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -619,6 +837,8 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			req.Name,
 			req.IPAddress,
 			"BAMBULAB",
+			req.Serial,
+			"", // access_code (empty for cloud mode)
 			acc.Email,
 			acc.PasswordHash,
 			acc.AccessToken,
@@ -690,8 +910,8 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 func middlewareCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Force cache busting for ALL responses
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		// Force cache busting for ALL responses (prevents stale UI)
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
 
@@ -755,4 +975,206 @@ func serveWithCacheControl(fs http.Handler) http.Handler {
 		// Let middlewareCORS handle cache headers
 		fs.ServeHTTP(w, r)
 	})
+}
+
+// handleSlicerUpload handles file uploads from slicers (OctoPrint-compatible API)
+func handleSlicerUpload(database *db.Database, hub *api.Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[SLICER GRABBER] Received upload from slicer")
+
+		// Ensure uploads directory exists
+		uploadDir := "./uploads"
+		thumbnailDir := filepath.Join(uploadDir, "thumbnails")
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			http.Error(w, "Failed to create upload directory", http.StatusInternalServerError)
+			return
+		}
+		if err := os.MkdirAll(thumbnailDir, 0755); err != nil {
+			http.Error(w, "Failed to create thumbnail directory", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse multipart form (100MB limit)
+		if err := r.ParseMultipartForm(100 << 20); err != nil {
+			http.Error(w, "File too large (max 100MB)", http.StatusBadRequest)
+			return
+		}
+
+		// Get file from form
+		file, handler, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "No file provided", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Validate file extension
+		ext := strings.ToLower(filepath.Ext(handler.Filename))
+		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && ext != ".gcode.3mf" {
+			http.Error(w, "Invalid file type. Only .gcode and .3mf files are allowed", http.StatusBadRequest)
+			return
+		}
+
+		// Save file
+		dstPath := filepath.Join(uploadDir, handler.Filename)
+		dst, err := os.Create(dstPath)
+		if err != nil {
+			http.Error(w, "Failed to save file", http.StatusInternalServerError)
+			return
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, file); err != nil {
+			http.Error(w, "Failed to save file", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("[SLICER GRABBER] Saved file: %s (%d bytes)", handler.Filename, handler.Size)
+
+		// Analyze file
+		analysis, err := parser.AnalyzeFile(dstPath, uploadDir)
+		if err != nil {
+			log.Printf("[SLICER GRABBER] Analysis warning: %v", err)
+			// Continue even if analysis fails
+			analysis = &parser.AnalysisResult{
+				Filename: handler.Filename,
+				FileSize: handler.Size,
+			}
+		}
+
+		log.Printf("[SLICER GRABBER] Analysis: time=%ds, filament=%.1fg, thumbnail=%s",
+			analysis.EstimatedTimeS, analysis.FilamentWeight, analysis.ThumbnailURL)
+
+		// Create print job
+		if err := database.AddPrintJob(handler.Filename, analysis.FilamentType, "Unknown", uint64(analysis.EstimatedTimeS)); err != nil {
+			http.Error(w, "Failed to create print job", http.StatusInternalServerError)
+			return
+		}
+
+		// Update job with metadata
+		if analysis.ThumbnailURL != "" || analysis.FilamentWeight > 0 {
+			// Get the last job ID (simplified - should use returned ID)
+			jobID, _, _, _ := database.GetNextPendingJob()
+			if jobID > 0 {
+				database.UpdateJobMetadata(jobID, analysis.ThumbnailURL, analysis.FilamentWeight)
+			}
+		}
+
+		// Log to system
+		hub.Send(api.NexusPacket{
+			EventType: "SYSTEM_LOG",
+			Log: &api.LogPayload{
+				Module:    "SLICER",
+				Level:     "INFO",
+				Message:   fmt.Sprintf("Slicer uploaded: %s (time: %ds, filament: %.1fg)", handler.Filename, analysis.EstimatedTimeS, analysis.FilamentWeight),
+				Timestamp: time.Now(),
+			},
+		})
+
+		// Return OctoPrint-compatible response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"done": true,
+			"files": map[string]interface{}{
+				"local": map[string]interface{}{
+					"name":      handler.Filename,
+					"path":      handler.Filename,
+					"display":   handler.Filename,
+					"origin":    "local",
+					"type":      ext,
+					"size":      handler.Size,
+					"date":      time.Now().Unix(),
+					"thumbnail": analysis.ThumbnailURL,
+					"printTime": analysis.EstimatedTimeS,
+					"filament":  analysis.FilamentWeight,
+				},
+			},
+		})
+	}
+}
+
+// sendBambuCommand sends a command to a Bambu printer via MQTT
+// Uses exact payloads from Python reverse-engineering
+func sendBambuCommand(printer db.Printer, action string, hub *api.Hub) {
+	// Map action to correct Bambu JSON payload (exact from Python lib)
+	var payload string
+
+	switch action {
+	case "pause":
+		// NO sequence_id for system commands (from Python lib)
+		payload = `{"print": {"command": "pause"}}`
+	case "resume":
+		payload = `{"print": {"command": "resume"}}`
+	case "stop":
+		payload = `{"print": {"command": "stop"}}`
+	case "g28", "home":
+		// sequence_id "0" for G-code commands (from Python lib)
+		payload = `{"print": {"sequence_id": "0", "command": "gcode_line", "param": "G28 \n"}}`
+	default:
+		hub.Send(api.NexusPacket{
+			EventType: "SYSTEM_LOG",
+			Log: &api.LogPayload{
+				Module:    "WEB",
+				Level:     "WARN",
+				Message:   fmt.Sprintf("Unknown command '%s' for Bambu %s", action, printer.Name),
+				Timestamp: time.Now(),
+			},
+		})
+		return
+	}
+
+	// Create MQTT client for this command
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(fmt.Sprintf("tcps://%s:8883", printer.IPAddress))
+	opts.SetClientID(fmt.Sprintf("nexus-hub-cmd-%s", printer.Serial))
+	opts.SetUsername("bblp")
+	opts.SetPassword(printer.AccessCode)
+	opts.SetTLSConfig(&tls.Config{InsecureSkipVerify: true})
+
+	client := mqtt.NewClient(opts)
+
+	log.Printf("[WEB] Sending Bambu command to %s: %s", printer.Name, payload)
+
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Printf("[WEB] Failed to connect to Bambu %s: %v", printer.Name, token.Error())
+		hub.Send(api.NexusPacket{
+			EventType: "SYSTEM_LOG",
+			Log: &api.LogPayload{
+				Module:    "WEB",
+				Level:     "ERROR",
+				Message:   fmt.Sprintf("Failed to connect to Bambu %s: %v", printer.Name, token.Error()),
+				Timestamp: time.Now(),
+			},
+		})
+		return
+	}
+	defer client.Disconnect(250)
+
+	// Send command to request topic
+	requestTopic := fmt.Sprintf("device/%s/request", printer.Serial)
+
+	if token := client.Publish(requestTopic, 1, false, payload); token.Wait() && token.Error() != nil {
+		log.Printf("[WEB] Failed to send command to Bambu %s: %v", printer.Name, token.Error())
+		hub.Send(api.NexusPacket{
+			EventType: "SYSTEM_LOG",
+			Log: &api.LogPayload{
+				Module:    "WEB",
+				Level:     "ERROR",
+				Message:   fmt.Sprintf("Failed to send command '%s' to Bambu %s: %v", action, printer.Name, token.Error()),
+				Timestamp: time.Now(),
+			},
+		})
+	} else {
+		log.Printf("[WEB] Command sent successfully to Bambu %s", printer.Name)
+		hub.Send(api.NexusPacket{
+			EventType: "SYSTEM_LOG",
+			Log: &api.LogPayload{
+				Module:    "WEB",
+				Level:     "INFO",
+				Message:   fmt.Sprintf("Sent command '%s' to Bambu %s", action, printer.Name),
+				Timestamp: time.Now(),
+			},
+		})
+	}
 }

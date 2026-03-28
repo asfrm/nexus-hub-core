@@ -6,30 +6,29 @@ import (
 	"log"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
+	"nexus-hub-core/printer/bambu"
 	"sync"
 	"time"
 )
 
 // Poller manages periodic status checks for all printers
 type Poller struct {
-	database *db.Database
-	hub      *api.Hub
-	interval time.Duration
-	mu       sync.Mutex
-	stopCh   chan struct{}
-
-	// Printer provider cache
-	providers map[int64]PrinterProvider
+	database     *db.Database
+	hub          *api.Hub
+	interval     time.Duration
+	mu           sync.Mutex
+	stopCh       chan struct{}
+	bambuClients map[int64]*bambu.Client
 }
 
 // NewPoller creates a new printer status poller
 func NewPoller(database *db.Database, hub *api.Hub) *Poller {
 	return &Poller{
-		database:  database,
-		hub:       hub,
-		interval:  5 * time.Second,
-		stopCh:    make(chan struct{}),
-		providers: make(map[int64]PrinterProvider),
+		database:     database,
+		hub:          hub,
+		interval:     5 * time.Second,
+		stopCh:       make(chan struct{}),
+		bambuClients: make(map[int64]*bambu.Client),
 	}
 }
 
@@ -68,128 +67,66 @@ func (p *Poller) pollAllPrinters(ctx context.Context) {
 }
 
 func (p *Poller) pollPrinter(ctx context.Context, printer db.Printer) {
-	provider := p.getOrCreateProvider(printer)
-	if provider == nil {
+	if printer.PrinterType == "BAMBULAB" {
+		p.pollBambuPrinter(ctx, printer)
 		return
 	}
 
-	status, err := provider.GetStatus(ctx)
-	if err != nil {
-		// Printer unreachable - mark as error
-		if printer.Status != "ERROR" {
-			p.database.UpdatePrinterStatus(printer.ID, "ERROR")
-			p.hub.Send(api.NexusPacket{
-				EventType: "SYSTEM_LOG",
-				Log: &api.LogPayload{
-					Module:    "POLLER",
-					Level:     "ERROR",
-					Message:   fmt.Sprintf("Printer %s (%s) unreachable: %v", printer.Name, printer.PrinterType, err),
-					Timestamp: time.Now(),
-				},
-			})
-		}
-		return
-	}
-
-	// Determine new status
-	newStatus := "IDLE"
-	switch status.State {
-	case "printing":
-		newStatus = "PRINTING"
-	case "paused":
-		newStatus = "PAUSED"
-	case "complete":
-		newStatus = "IDLE"
-	case "error":
-		newStatus = "ERROR"
-	}
-
-	// Update database if status changed
-	if newStatus != printer.Status {
-		p.database.UpdatePrinterStatus(printer.ID, newStatus)
-
-		// If print completed, update job status
-		if newStatus == "IDLE" && printer.Status == "PRINTING" {
-			p.markJobComplete(printer.ID)
-		}
-
-		p.hub.Send(api.NexusPacket{
-			EventType: "SYSTEM_LOG",
-			Log: &api.LogPayload{
-				Module:    "POLLER",
-				Level:     "INFO",
-				Message:   fmt.Sprintf("Printer %s status changed: %s -> %s", printer.Name, printer.Status, newStatus),
-				Timestamp: time.Now(),
-			},
-		})
-	}
-
-	// Broadcast printer status update
-	p.hub.Send(api.NexusPacket{
-		EventType: "PRINTER_STATUS",
-		Payload: map[string]interface{}{
-			"printer_id":   printer.ID,
-			"printer_name": printer.Name,
-			"printer_type": printer.PrinterType,
-			"status":       newStatus,
-			"filename":     status.Filename,
-			"progress":     status.Progress,
-			"time_left":    status.TimeLeft,
-			"temperatures": status.Temperatures,
-			"targets":      status.Targets,
-			"fan_speed":    status.FanSpeed,
-		},
-	})
+	// For Moonraker printers (implementation pending)
+	log.Printf("[POLLER] Moonraker polling not yet implemented for %s", printer.Name)
 }
 
-func (p *Poller) getOrCreateProvider(printer db.Printer) PrinterProvider {
+func (p *Poller) pollBambuPrinter(ctx context.Context, printer db.Printer) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	client, exists := p.bambuClients[printer.ID]
+	if !exists {
+		// Create new Bambu client
+		client = bambu.NewClient()
 
-	// Check cache
-	if provider, ok := p.providers[printer.ID]; ok {
-		return provider
+		// Connect to printer
+		err := client.ConnectLAN(printer.IPAddress, printer.AccessCode, printer.Serial)
+		if err != nil {
+			p.mu.Unlock()
+			log.Printf("[BAMBU POLLER] Failed to connect to %s: %v", printer.Name, err)
+			return
+		}
+
+		p.bambuClients[printer.ID] = client
+
+		// Start status listener goroutine
+		go func(id int64, name string, c *bambu.Client) {
+			for status := range c.GetStatusChan() {
+				p.hub.Send(api.NexusPacket{
+					EventType: "PRINTER_STATUS",
+					Payload: map[string]interface{}{
+						"printer_id":           id,
+						"printer_name":         name,
+						"printer_type":         "BAMBULAB",
+						"status":               status.State,
+						"filename":             status.Filename,
+						"progress":             status.Progress,
+						"time_left":            status.TimeLeft,
+						"layer":                status.Layer,
+						"total_layers":         status.TotalLayers,
+						"nozzle_temper":        status.Temperatures["nozzle"],
+						"bed_temper":           status.Temperatures["bed"],
+						"nozzle_target_temper": status.Targets["nozzle"],
+						"bed_target_temper":    status.Targets["bed"],
+						"fan_speed":            status.FanSpeed,
+						"speed_level":          status.SpeedLevel,
+					},
+				})
+			}
+		}(printer.ID, printer.Name, client)
 	}
+	p.mu.Unlock()
 
-	// Create provider based on printer type
-	var provider PrinterProvider
-
-	config := PrinterConfig{
-		PrinterID:   printer.ID,
-		Address:     printer.IPAddress,
-		Username:    printer.Username,
-		Password:    printer.Password,
-		AccessToken: printer.AccessToken,
-		Secret:      printer.Secret,
-		Extra:       make(map[string]string),
-	}
-
-	// Parse extra JSON if needed (simplified for now)
-	printerType := PrinterTypeMoonraker
-	if printer.PrinterType != "" {
-		printerType = PrinterType(printer.PrinterType)
-	}
-
-	switch printerType {
-	case PrinterTypeBambuLab:
-		config.PrinterType = PrinterTypeBambuLab
-		provider = NewBambuProvider(config)
-	case PrinterTypeMoonraker, PrinterTypeGeneric:
-		fallthrough
-	default:
-		config.PrinterType = PrinterTypeMoonraker
-		provider = NewMoonrakerProvider(config)
-	}
-
-	// Connect to printer
-	ctx := context.Background()
-	if err := provider.Connect(ctx); err != nil {
-		log.Printf("Failed to connect to printer %s: %v", printer.Name, err)
-		return nil
-	}
-
-	p.providers[printer.ID] = provider
-	return provider
+	// Get current status (for logging)
+	status := client.GetStatus()
+	log.Printf("[BAMBU POLLER] %s: %s | Progress: %.1f%% | Nozzle: %.1f/%.1f°C | Bed: %.1f/%.1f°C",
+		printer.Name, status.State, status.Progress,
+		status.Temperatures["nozzle"], status.Targets["nozzle"],
+		status.Temperatures["bed"], status.Targets["bed"])
 }
 
 func (p *Poller) markJobComplete(printerID int64) {

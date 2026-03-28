@@ -43,10 +43,17 @@ if pgrep -f "nexus-hub-core" > /dev/null; then
     sleep 1
 fi
 
-# Remove old build artifacts
+# Remove old build artifacts - CRITICAL: Clean ui/ directory properly
+# Note: DO NOT delete ui/index.html - Vite needs it as entry point!
 if [ -d "ui/dist" ]; then
     echo "   Removing ui/dist/..."
     rm -rf ui/dist
+fi
+
+# Only remove old assets folder if it exists (from old builds)
+if [ -d "ui/assets" ]; then
+    echo "   Removing old ui/assets/..."
+    rm -rf ui/assets
 fi
 
 if [ -d "dist" ]; then
@@ -91,14 +98,33 @@ echo ""
 ###############################################################################
 # Step 3: Asset Deployment
 ###############################################################################
-echo -e "${YELLOW}[3/6] Deploying assets to root dist/ folder...${NC}"
+echo -e "${YELLOW}[3/6] Deploying assets to dist/ folder...${NC}"
 
-# Create root dist directory
+# Remove old dist completely to ensure fresh files
+if [ -d "dist" ]; then
+    echo "   Removing old dist/..."
+    rm -rf dist
+fi
+
+# Create fresh dist directory
 mkdir -p dist
 
 # Copy everything from ui/dist/ to root dist/
 cp -r ui/dist/* dist/
 
+# Add cache-busting timestamp to index.html
+if [ -f "dist/index.html" ]; then
+    TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    sed -i "s|<title>|<!-- Build: $TIMESTAMP -->\n    <title>|g" dist/index.html
+    echo "   Added cache-busting timestamp: $TIMESTAMP"
+    
+    # Show build info
+    echo "   Build verification:"
+    grep -o 'index-.*\.js' dist/index.html | head -1 | sed 's/^/     JS Bundle: /'
+    grep -o 'index-.*\.css' dist/index.html | head -1 | sed 's/^/     CSS Bundle: /'
+fi
+
+# Verify deployment
 if [ ! -f "dist/index.html" ]; then
     echo -e "   ${RED}✗ Asset deployment failed - index.html not found${NC}"
     exit 1
@@ -124,8 +150,9 @@ echo ""
 ###############################################################################
 echo -e "${YELLOW}[5/6] Building Go backend...${NC}"
 
-# Build the Go backend
-echo "   Running go build -o nexus-hub-core..."
+# Build the Go backend with CGO disabled for static linking (pure Go MQTT)
+echo "   Running go build -o nexus-hub-core (CGO_ENABLED=0)..."
+export CGO_ENABLED=0
 go build -o nexus-hub-core -v .
 
 if [ ! -f "nexus-hub-core" ]; then
@@ -147,6 +174,10 @@ echo -e "${GREEN}║                                                        ║$
 echo -e "${GREEN}║  Web UI:    http://localhost:8080                      ║${NC}"
 echo -e "${GREEN}║  API:       http://localhost:8080/api                  ║${NC}"
 echo -e "${GREEN}║  WebSocket: ws://localhost:8080/ws                     ║${NC}"
+echo -e "${GREEN}║                                                        ║${NC}"
+echo -e "${GREEN}║  ⚠️  If you see old UI:                                ║${NC}"
+echo -e "${GREEN}║     - Press Ctrl+Shift+R (hard refresh)                ║${NC}"
+echo -e "${GREEN}║     - Or clear browser cache                           ║${NC}"
 echo -e "${GREEN}║                                                        ║${NC}"
 echo -e "${GREEN}║  Press Ctrl+C to stop                                  ║${NC}"
 echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${NC}"
