@@ -531,13 +531,18 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		}
 		dst.Close()
 
-		meta := slicer.ParseGCodeMetadata(tempPath)
+		analysis, err := parser.AnalyzeFile(tempPath, "uploads")
 		os.Remove(tempPath)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"detected_model": meta.PrinterModel,
-			"filament_type":  meta.FilamentType,
+			"detected_model": analysis.PrinterModel,
+			"filament_type":  analysis.FilamentType,
 		})
 	})
 

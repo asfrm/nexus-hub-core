@@ -4,6 +4,7 @@ package parser
 import (
 	"archive/zip"
 	"bufio"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -31,12 +32,13 @@ type AnalysisResult struct {
 	IsSliced       bool    `json:"is_sliced"`
 }
 
-// GenericXMLMetadata handles various XML structures used by different slicers
-type GenericXMLMetadata struct {
-	XMLName xml.Name
-	Attrs   []xml.Attr           `xml:",any,attr"`
-	Nodes   []GenericXMLMetadata `xml:",any"`
-	Content string               `xml:",chardata"`
+var modelMap = map[string]string{
+	"N1":  "Bambu Lab A1 mini",
+	"N2S": "Bambu Lab A1",
+	"X1":  "Bambu Lab X1",
+	"X1C": "Bambu Lab X1C",
+	"P1P": "Bambu Lab P1P",
+	"P1S": "Bambu Lab P1S",
 }
 
 // AnalyzeFile analyzes GCODE and Sliced 3MF files
@@ -49,7 +51,6 @@ func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 		if err == nil {
 			return result, nil
 		}
-		// If it's not a valid ZIP, try analyzing it as a GCODE file
 		return analyzeGCODE(filePath, uploadDir)
 	}
 
@@ -59,11 +60,10 @@ func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 	case ".gcode", ".g":
 		return analyzeGCODE(filePath, uploadDir)
 	default:
-		return nil, fmt.Errorf("unsupported file type: %s. Only slicer-processed files (.gcode, .3mf) are supported", ext)
+		return nil, fmt.Errorf("unsupported file type: %s", ext)
 	}
 }
 
-// analyze3MF parses a 3MF file and verifies it is a SLICED file
 func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	result := &AnalysisResult{
 		Filename:     filepath.Base(filePath),
@@ -86,16 +86,13 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	hasGCode := false
 
 	for _, f := range r.File {
-		// Identify sliced 3MF content
 		if strings.Contains(f.Name, "Metadata/") || strings.HasSuffix(f.Name, ".config") || strings.HasSuffix(f.Name, ".xml") {
 			hasSlicingConfig = true
 		}
-
 		if strings.HasSuffix(f.Name, ".gcode") {
 			hasGCode = true
+			_ = parseGCODEFromZip(f, result)
 		}
-
-		// Extract thumbnail
 		if (strings.Contains(f.Name, "Metadata/plate_") || strings.Contains(f.Name, ".png") || strings.Contains(f.Name, ".jpg")) &&
 			(strings.HasSuffix(f.Name, ".png") || strings.HasSuffix(f.Name, ".jpg")) {
 			safeName := strings.ReplaceAll(f.Name, "/", "_")
@@ -104,19 +101,14 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 				result.ThumbnailURL = "/uploads/thumbnails/" + safeName
 			}
 		}
-
-		// Robust Metadata Parsing
-		if strings.HasSuffix(f.Name, ".xml") || strings.HasSuffix(f.Name, ".3mf") {
-			_ = parseMetadataXML(f, result)
+		if strings.HasPrefix(f.Name, "Metadata/plate_") && strings.HasSuffix(f.Name, ".json") {
+			_ = parsePlateJSON(f, result)
 		}
-
-		// Fallback for OrcaSlicer config files (INI style)
-		if strings.HasSuffix(f.Name, ".config") || strings.HasSuffix(f.Name, ".ini") {
-			_ = parseConfigINI(f, result)
+		if strings.HasSuffix(f.Name, ".xml") || strings.HasSuffix(f.Name, ".3mf") || strings.HasSuffix(f.Name, ".config") {
+			_ = parseMetadataXML(f, result)
 		}
 	}
 
-	// Final Fallback: Guess from filename if still unknown
 	if result.PrinterModel == "Unknown" || result.FilamentType == "Unknown" {
 		guessFromFilename(result)
 	}
@@ -129,13 +121,88 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	return result, nil
 }
 
+func parsePlateJSON(file *zip.File, result *AnalysisResult) error {
+	rc, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	byteValue, _ := io.ReadAll(rc)
+	var data map[string]interface{}
+	if err := json.Unmarshal(byteValue, &data); err != nil {
+		return err
+	}
+
+	if timeStr, ok := data["estimated_time"].(string); ok && result.EstimatedTimeS == 0 {
+		result.EstimatedTimeS = parseTimeEstimate(timeStr)
+	} else if timeFloat, ok := data["estimated_time_s"].(float64); ok && result.EstimatedTimeS == 0 {
+		result.EstimatedTimeS = int64(timeFloat)
+	}
+	if filaments, ok := data["filament_type"].([]interface{}); ok && len(filaments) > 0 && result.FilamentType == "Unknown" {
+		result.FilamentType = fmt.Sprintf("%v", filaments[0])
+	}
+	if weights, ok := data["filament_weights"].([]interface{}); ok && len(weights) > 0 && result.FilamentWeight == 0 {
+		if w, ok := weights[0].(float64); ok {
+			result.FilamentWeight = float32(w)
+		}
+	}
+	return nil
+}
+
+func parseGCODEFromZip(file *zip.File, result *AnalysisResult) error {
+	rc, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	scanner := bufio.NewScanner(rc)
+	linesRead := 0
+	for scanner.Scan() && linesRead < 2000 {
+		linesRead++
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.Contains(line, "=") || strings.Contains(line, ":") {
+			var key, val string
+			if strings.Contains(line, "=") {
+				parts := strings.SplitN(line, "=", 2)
+				key = strings.TrimSpace(strings.TrimPrefix(parts[0], ";"))
+				val = strings.Trim(strings.TrimSpace(parts[1]), "; \"'")
+			} else {
+				parts := strings.SplitN(line, ":", 2)
+				key = strings.TrimSpace(strings.TrimPrefix(parts[0], ";"))
+				val = strings.Trim(strings.TrimSpace(parts[1]), "; \"'")
+			}
+			if key != "" && val != "" {
+				if strings.Contains(key, "estimated printing time") && result.EstimatedTimeS == 0 {
+					result.EstimatedTimeS = parseTimeEstimate(val)
+				} else if strings.Contains(key, "filament_type") && result.FilamentType == "Unknown" {
+					types := strings.Split(val, ",")
+					result.FilamentType = types[0]
+				} else if (strings.Contains(key, "printer_model") || strings.Contains(key, "model_id")) && result.PrinterModel == "Unknown" {
+					result.PrinterModel = val
+				} else if key == "bed_temperature" || key == "first_layer_bed_temperature" {
+					if v, err := strconv.ParseFloat(val, 32); err == nil && result.BedTemp == 0 {
+						result.BedTemp = float32(v)
+					}
+				} else if key == "temperature" || key == "first_layer_temperature" {
+					if v, err := strconv.ParseFloat(val, 32); err == nil && result.NozzleTemp == 0 {
+						result.NozzleTemp = float32(v)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func parseMetadataXML(file *zip.File, result *AnalysisResult) error {
 	rc, err := file.Open()
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-
 	decoder := xml.NewDecoder(rc)
 	for {
 		t, err := decoder.Token()
@@ -144,7 +211,6 @@ func parseMetadataXML(file *zip.File, result *AnalysisResult) error {
 		}
 		switch se := t.(type) {
 		case xml.StartElement:
-			// Look for <metadata key="..." value="..." /> or similar
 			var key, value string
 			for _, attr := range se.Attr {
 				if attr.Name.Local == "key" || attr.Name.Local == "name" {
@@ -153,24 +219,37 @@ func parseMetadataXML(file *zip.File, result *AnalysisResult) error {
 				if attr.Name.Local == "value" || attr.Name.Local == "content" {
 					value = attr.Value
 				}
-				// Direct attributes like printer_model="X1C"
+				// Handle direct attributes in <filament ...> tag
+				if se.Name.Local == "filament" {
+					if attr.Name.Local == "type" && result.FilamentType == "Unknown" {
+						result.FilamentType = attr.Value
+					}
+					if (attr.Name.Local == "used_g" || attr.Name.Local == "weight") && result.FilamentWeight == 0 {
+						if v, err := strconv.ParseFloat(attr.Value, 32); err == nil {
+							result.FilamentWeight = float32(v)
+						}
+					}
+				}
+				// Handle attributes in <metadata ...> or other tags
 				if attr.Name.Local == "printer_model" || attr.Name.Local == "printer_model_id" {
-					result.PrinterModel = attr.Value
+					if result.PrinterModel == "Unknown" {
+						result.PrinterModel = attr.Value
+					}
 				}
-				if attr.Name.Local == "filament_type" || attr.Name.Local == "filament_id" {
-					result.FilamentType = attr.Value
-				}
-				if attr.Name.Local == "print_time" {
-					if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil {
+				if attr.Name.Local == "print_time" || attr.Name.Local == "prediction" {
+					if v, err := strconv.ParseInt(attr.Value, 10, 64); err == nil && result.EstimatedTimeS == 0 {
 						result.EstimatedTimeS = v
 					}
 				}
 			}
-
 			if key != "" && value != "" {
 				applyMetadataValue(key, value, result)
 			}
 		}
+	}
+	// Map model ID to name
+	if readable, ok := modelMap[result.PrinterModel]; ok {
+		result.PrinterModel = readable
 	}
 	return nil
 }
@@ -186,12 +265,16 @@ func applyMetadataValue(key, value string, result *AnalysisResult) {
 		if result.FilamentType == "Unknown" {
 			result.FilamentType = value
 		}
-	case "estimated_time", "print_time":
-		if v, err := strconv.ParseInt(value, 10, 64); err == nil {
+	case "estimated_time", "print_time", "prediction":
+		if v, err := strconv.ParseInt(value, 10, 64); err == nil && result.EstimatedTimeS == 0 {
 			result.EstimatedTimeS = v
 		}
+	case "weight":
+		if v, err := strconv.ParseFloat(value, 32); err == nil && result.FilamentWeight == 0 {
+			result.FilamentWeight = float32(v)
+		}
 	case "layer_height":
-		if v, err := strconv.ParseFloat(value, 32); err == nil {
+		if v, err := strconv.ParseFloat(value, 32); err == nil && result.LayerHeight == 0 {
 			result.LayerHeight = float32(v)
 		}
 	}
@@ -203,7 +286,6 @@ func parseConfigINI(file *zip.File, result *AnalysisResult) error {
 		return err
 	}
 	defer rc.Close()
-
 	scanner := bufio.NewScanner(rc)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -211,7 +293,6 @@ func parseConfigINI(file *zip.File, result *AnalysisResult) error {
 			parts := strings.SplitN(line, "=", 2)
 			key := strings.TrimSpace(parts[0])
 			val := strings.Trim(strings.TrimSpace(parts[1]), "; \"'")
-
 			if strings.Contains(key, "filament_type") && result.FilamentType == "Unknown" {
 				result.FilamentType = val
 			}
@@ -232,7 +313,6 @@ func guessFromFilename(result *AnalysisResult) {
 			break
 		}
 	}
-
 	if strings.Contains(upperName, "X1C") || strings.Contains(upperName, "X1") {
 		result.PrinterModel = "Bambu Lab X1C"
 	} else if strings.Contains(upperName, "P1P") {
@@ -251,13 +331,11 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 		PrinterModel: "Generic",
 		IsSliced:     true,
 	}
-
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-
 	scanner := bufio.NewScanner(file)
 	linesRead := 0
 	for scanner.Scan() && linesRead < 10000 {
@@ -266,7 +344,6 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 		if !strings.HasPrefix(line, ";") {
 			continue
 		}
-
 		line = strings.TrimSpace(line)
 		if strings.Contains(line, "=") || strings.Contains(line, ":") {
 			var key, val string
@@ -279,9 +356,7 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 				key = strings.TrimSpace(strings.TrimPrefix(parts[0], ";"))
 				val = strings.Trim(strings.TrimSpace(parts[1]), "; \"'")
 			}
-
 			if key != "" && val != "" {
-				// Handle specific keys
 				if strings.Contains(key, "estimated printing time") {
 					result.EstimatedTimeS = parseTimeEstimate(val)
 				} else if strings.Contains(key, "filament used") && strings.Contains(line, "[g]") {
@@ -306,11 +381,9 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 			}
 		}
 	}
-
 	if result.PrinterModel == "Generic" || result.FilamentType == "Unknown" {
 		guessFromFilename(result)
 	}
-
 	return result, nil
 }
 
@@ -333,7 +406,6 @@ func extractFile(file *zip.File, destPath string) error {
 
 func parseTimeEstimate(timeStr string) int64 {
 	var total int64
-	// Format: 2h 15m 30s or similar
 	hParts := strings.Split(timeStr, "h")
 	if len(hParts) > 1 {
 		h, _ := strconv.ParseInt(strings.TrimSpace(hParts[0]), 10, 64)
@@ -349,7 +421,6 @@ func parseTimeEstimate(timeStr string) int64 {
 	sParts := strings.Split(timeStr, "s")
 	s, _ := strconv.ParseInt(strings.TrimSpace(sParts[0]), 10, 64)
 	total += s
-
 	return total
 }
 
