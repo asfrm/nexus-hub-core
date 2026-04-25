@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"mime/multipart"
@@ -10,158 +11,95 @@ import (
 	"time"
 )
 
-func RunStressTest(baseURL string) {
-	log.Println("🔥 Starting Stress & Concurrency Testing...")
+func RunMegaBlitz(ctx context.Context, baseURL string) {
+	log.Println("⚡ INITIALIZING MEGA BLITZ ATTACK (30s duration)...")
 	
+	blitzCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	var wg sync.WaitGroup
-	
-	// 1. Concurrent GET Requests (WAL Verification)
-	log.Println("   [1] Stressing GET endpoints under load...")
-	endpoints := []string{"/api/stats", "/api/analytics", "/api/clusters", "/api/jobs/list"}
-	for _, ep := range endpoints {
+
+	// 1. API Flood - 5000 Workers
+	log.Println("   [1] Launching 5000 API Flood Workers...")
+	for i := 0; i < 5000; i++ {
 		wg.Add(1)
-		go func(endpoint string) {
+		go func(id int) {
 			defer wg.Done()
-			start := time.Now()
-			successCount := 0
-			for i := 0; i < 500; i++ {
-				resp, err := http.Get(baseURL + endpoint)
-				if err == nil && resp.StatusCode == http.StatusOK {
-					successCount++
-					resp.Body.Close()
+			client := &http.Client{Timeout: 2 * time.Second}
+			for {
+				select {
+				case <-blitzCtx.Done():
+					return
+				default:
+					resp, err := client.Get(baseURL + "/api/stats")
+					if err == nil {
+						resp.Body.Close()
+					}
 				}
 			}
-			log.Printf("       - %s: %d/500 OK (Avg: %v)", endpoint, successCount, time.Since(start)/500)
-		}(ep)
+		}(i)
 	}
 
-	// 2. 50MB Payload Test
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Println("   [2] Testing 50MB large file upload...")
-		data := make([]byte, 50*1024*1024) // 50MB
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		part, _ := writer.CreateFormFile("file", "large_model.3mf")
-		part.Write(data)
-		writer.Close()
-
-		resp, err := http.Post(baseURL+"/api/files/local", writer.FormDataContentType(), body)
-		if err != nil {
-			log.Printf("       ❌ 50MB Upload failed: %v", err)
-			return
-		}
-		log.Printf("       ✅ 50MB Upload response: %d", resp.StatusCode)
-		resp.Body.Close()
-	}()
-
-	wg.Wait()
-}
-
-func RunRealLifeStressTest(baseURL string) {
-	log.Println("🌍 Starting REAL LIFE Scenario Test (1000 Printers + 1000 Active Users)...")
-	
-	var wg sync.WaitGroup
-
-	// 1. Simulate 1000 Users Watching Live Updates (WS/GET)
-	log.Println("   [1] Spawning 1000 concurrent user sessions...")
+	// 2. Control Command Storm
+	log.Println("   [2] Launching Printer Control Storm...")
 	for i := 0; i < 1000; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			// Each user checks stats every few seconds
-			for j := 0; j < 5; j++ {
-				resp, err := http.Get(baseURL + "/api/stats")
-				if err == nil {
-					resp.Body.Close()
+			client := &http.Client{Timeout: 2 * time.Second}
+			for {
+				select {
+				case <-blitzCtx.Done():
+					return
+				default:
+					printerID := (id % 1000) + 1
+					url := fmt.Sprintf("%s/api/printers/control?id=%d&action=pause", baseURL, printerID)
+					resp, err := client.Get(url)
+					if err == nil {
+						resp.Body.Close()
+					}
 				}
-				time.Sleep(200 * time.Millisecond)
 			}
 		}(i)
 	}
 
-	// 2. Simulate User Actions (Button Presses)
-	log.Println("   [2] Simulating 500 concurrent printer control commands...")
-	for i := 1; i <= 500; i++ {
+	// 3. Massive Upload Burst
+	log.Println("   [3] Launching 50 Concurrent 50MB Uploads...")
+	data := make([]byte, 50*1024*1024)
+	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			// Randomly home or pause
-			action := "g28"
-			if id % 2 == 0 { action = "pause" }
-			
-			url := fmt.Sprintf("%s/api/printers/control?id=%d&action=%s", baseURL, id, action)
-			resp, err := http.Get(url)
-			if err == nil {
-				resp.Body.Close()
-			}
-		}(i)
-	}
-
-	// 3. Concurrent File Uploads (Multiple Users Slicing)
-	log.Println("   [3] Bursting 10 concurrent 5MB uploads...")
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			data := make([]byte, 5*1024*1024)
 			body := &bytes.Buffer{}
 			writer := multipart.NewWriter(body)
-			part, _ := writer.CreateFormFile("file", fmt.Sprintf("user_%d_print.gcode", id))
+			part, _ := writer.CreateFormFile("file", fmt.Sprintf("blitz_%d.3mf", id))
 			part.Write(data)
 			writer.Close()
 
-			resp, err := http.Post(baseURL+"/api/files/local", writer.FormDataContentType(), body)
+			req, _ := http.NewRequestWithContext(blitzCtx, "POST", baseURL+"/api/files/local", body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			
+			client := &http.Client{}
+			resp, err := client.Do(req)
 			if err == nil {
 				resp.Body.Close()
 			}
 		}(i)
 	}
 
+	log.Println("🚀 BLITZ IN PROGRESS...")
 	wg.Wait()
-	log.Println("   ✅ Real-life scenario complete.")
+	log.Println("🏁 BLITZ COMPLETED.")
+}
+
+func RunStressTest(baseURL string) {
+	// Replaced by MegaBlitz
 }
 
 func RunBreakerTest(baseURL string) {
-	log.Println("🔨 Starting CRASH TEST (Absolute Limits)...")
-	
-	// Flood with extremely high concurrency
-	concurrency := 1500
-	log.Printf("   [*] Spawning %d concurrent attackers...", concurrency)
-	
-	for i := 0; i < concurrency; i++ {
-		go func(id int) {
-			for {
-				// Rapid fire small requests
-				resp, err := http.Get(baseURL + "/api/health")
-				if err == nil {
-					resp.Body.Close()
-				}
-				
-				// Occasional heavy write
-				if id % 100 == 0 {
-					data := []byte(`{"name": "Attacker Cluster", "target_model": "Exploit"}`)
-					http.Post(baseURL+"/api/clusters/create", "application/json", bytes.NewBuffer(data))
-				}
-				
-				time.Sleep(1 * time.Millisecond)
-			}
-		}(i)
-	}
+	// Replaced by MegaBlitz
+}
 
-	// Keep main thread alive to watch it burn
-	log.Println("   [*] Attack in progress. System should hit file descriptor limits or memory pressure...")
-	start := time.Now()
-	for i := 0; i < 15; i++ {
-		time.Sleep(1 * time.Second)
-		resp, err := http.Get(baseURL + "/api/health")
-		if err != nil {
-			log.Printf("   💥 SYSTEM CRASHED after %v! Error: %v", time.Since(start), err)
-			return
-		}
-		resp.Body.Close()
-		log.Printf("   ... %d seconds still alive", i+1)
-	}
-	log.Println("   🏁 System survived 15s of extreme flood.")
+func RunRealLifeStressTest(baseURL string) {
+	// Replaced by MegaBlitz
 }

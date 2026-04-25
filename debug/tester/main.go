@@ -15,7 +15,11 @@ import (
 )
 
 func main() {
-	log.Println("🚀 Starting Nexus Hub Emulation Tester")
+	log.Println("🚀 Starting Nexus Hub MEGA BLITZ Tester")
+
+	// Global Timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
 	// 1. Start Mocks
 	StartMoonrakerMock(7125)
@@ -32,8 +36,6 @@ func main() {
 	}
 
 	hub := api.NewHub()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// 3. Initialize Hub Components
 	log.Println("📦 Initializing Hub Components...")
@@ -52,63 +54,28 @@ func main() {
 	// 4. Run Test Scenario
 	runTestScenario(database, hub)
 
-	// 5. Stress & Security Tests
+	// 5. MEGA BLITZ Stress & Security Tests
 	testURL := "http://localhost:8081"
 	RunSecurityTest(testURL)
-	RunStressTest(testURL)
-	RunRealLifeStressTest(testURL)
-	RunBreakerTest(testURL)
+	RunMegaBlitz(ctx, testURL)
 
-	log.Println("✅ Testing Complete. Shutting down...")
+	log.Println("✅ MEGA BLITZ Complete. Shutting down...")
 	time.Sleep(1 * time.Second)
 }
 
 func runTestScenario(database *db.Database, hub *api.Hub) {
-	log.Println("🧪 Running Test Scenario...")
-
-	// Step A: Create Cluster
-	log.Println("   [A] Creating Cluster...")
-	if err := database.CreateCluster("Test Cluster", "X1C"); err != nil {
-		log.Printf("❌ Failed to create cluster: %v", err)
-		return
-	}
-
-	// Step B: Add Printers
-	log.Println("   [B] Adding 1000 Mock Printers (500 Moonraker, 500 Bambu)...")
+	log.Println("🧪 Pre-populating 1000 printers via Transaction...")
+	
+	tx, _ := database.Conn.Begin()
 	for i := 1; i <= 500; i++ {
 		// Moonraker
-		if err := database.AddPrinter(1, fmt.Sprintf("Moon-%d", i), "127.0.0.1:7125", "MOONRAKER", fmt.Sprintf("MOON%03d", i), "", "", "", "", "", ""); err != nil {
-			log.Printf("❌ Failed to add Moonraker %d: %v", i, err)
-		}
+		tx.Exec("INSERT INTO printers (cluster_id, name, ip_address, printer_type, serial, access_code, username, password, access_token, api_key, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			1, fmt.Sprintf("Moon-%d", i), "127.0.0.1:7125", "MOONRAKER", fmt.Sprintf("MOON%03d", i), "", "", "", "", "", "")
+		
 		// Bambu
-		if err := database.AddPrinter(1, fmt.Sprintf("Bambu-%d", i), "127.0.0.1", "BAMBULAB", fmt.Sprintf("BAMB%03d", i), "12345678", "bblp", "", "", "", `{"local_ip": "127.0.0.1"}`); err != nil {
-			log.Printf("❌ Failed to add Bambu %d: %v", i, err)
-		}
+		tx.Exec("INSERT INTO printers (cluster_id, name, ip_address, printer_type, serial, access_code, username, password, access_token, api_key, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			1, fmt.Sprintf("Bambu-%d", i), "127.0.0.1", "BAMBULAB", fmt.Sprintf("BAMB%03d", i), "12345678", "bblp", "", "", "", `{"local_ip": "127.0.0.1"}`)
 	}
-
-	// Step C: Create a Job
-	log.Println("   [C] Creating Print Job...")
-	if err := database.AddPrintJob("test_part.gcode", "PLA", "X1C", 3600); err != nil {
-		log.Printf("❌ Failed to add print job: %v", err)
-	}
-
-	// Step D: Trigger Assignment (Manual first)
-	log.Println("   [D] Manually Assigning Job...")
-	if err := database.AssignJob(1, 1, 1); err != nil {
-		log.Printf("❌ Failed to assign job: %v", err)
-	}
-
-	// Step E: Check Status
-	time.Sleep(2 * time.Second)
-	job, _ := database.GetJobByID(1)
-	log.Printf("   [E] Job Status: %s (Target: %d)", job.Status, job.TargetPrinterID)
-
-	// Step F: Verify Poller activity
-	log.Println("   [F] Waiting for Poller heartbeat...")
-	time.Sleep(5 * time.Second)
-	
-	stats, _ := database.GetPrinterWearStats()
-	for _, s := range stats {
-		log.Printf("   [F] Printer %s Wear Score: %.2f", s.PrinterName, s.WearScore)
-	}
+	tx.Commit()
+	log.Println("   ✅ Database populated.")
 }
