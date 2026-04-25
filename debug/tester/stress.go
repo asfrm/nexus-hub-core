@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"mime/multipart"
 	"net/http"
@@ -58,11 +59,75 @@ func RunStressTest(baseURL string) {
 	wg.Wait()
 }
 
+func RunRealLifeStressTest(baseURL string) {
+	log.Println("🌍 Starting REAL LIFE Scenario Test (1000 Printers + 1000 Active Users)...")
+	
+	var wg sync.WaitGroup
+
+	// 1. Simulate 1000 Users Watching Live Updates (WS/GET)
+	log.Println("   [1] Spawning 1000 concurrent user sessions...")
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// Each user checks stats every few seconds
+			for j := 0; j < 5; j++ {
+				resp, err := http.Get(baseURL + "/api/stats")
+				if err == nil {
+					resp.Body.Close()
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+		}(i)
+	}
+
+	// 2. Simulate User Actions (Button Presses)
+	log.Println("   [2] Simulating 500 concurrent printer control commands...")
+	for i := 1; i <= 500; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			// Randomly home or pause
+			action := "g28"
+			if id % 2 == 0 { action = "pause" }
+			
+			url := fmt.Sprintf("%s/api/printers/control?id=%d&action=%s", baseURL, id, action)
+			resp, err := http.Get(url)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+
+	// 3. Concurrent File Uploads (Multiple Users Slicing)
+	log.Println("   [3] Bursting 10 concurrent 5MB uploads...")
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			data := make([]byte, 5*1024*1024)
+			body := &bytes.Buffer{}
+			writer := multipart.NewWriter(body)
+			part, _ := writer.CreateFormFile("file", fmt.Sprintf("user_%d_print.gcode", id))
+			part.Write(data)
+			writer.Close()
+
+			resp, err := http.Post(baseURL+"/api/files/local", writer.FormDataContentType(), body)
+			if err == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	log.Println("   ✅ Real-life scenario complete.")
+}
+
 func RunBreakerTest(baseURL string) {
 	log.Println("🔨 Starting CRASH TEST (Absolute Limits)...")
 	
 	// Flood with extremely high concurrency
-	concurrency := 1000
+	concurrency := 1500
 	log.Printf("   [*] Spawning %d concurrent attackers...", concurrency)
 	
 	for i := 0; i < concurrency; i++ {

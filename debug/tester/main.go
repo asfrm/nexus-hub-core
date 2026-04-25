@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
@@ -55,6 +56,7 @@ func main() {
 	testURL := "http://localhost:8081"
 	RunSecurityTest(testURL)
 	RunStressTest(testURL)
+	RunRealLifeStressTest(testURL)
 	RunBreakerTest(testURL)
 
 	log.Println("✅ Testing Complete. Shutting down...")
@@ -72,14 +74,16 @@ func runTestScenario(database *db.Database, hub *api.Hub) {
 	}
 
 	// Step B: Add Printers
-	log.Println("   [B] Adding Mock Printers...")
-	// Moonraker
-	if err := database.AddPrinter(1, "Mock Moonraker", "127.0.0.1:7125", "MOONRAKER", "MOON001", "", "", "", "", "", ""); err != nil {
-		log.Printf("❌ Failed to add Moonraker: %v", err)
-	}
-	// Bambu (using local IP 127.0.0.1 for mock)
-	if err := database.AddPrinter(1, "Mock Bambu", "127.0.0.1", "BAMBULAB", "BAMB001", "12345678", "bblp", "", "", "", `{"local_ip": "127.0.0.1"}`); err != nil {
-		log.Printf("❌ Failed to add Bambu: %v", err)
+	log.Println("   [B] Adding 1000 Mock Printers (500 Moonraker, 500 Bambu)...")
+	for i := 1; i <= 500; i++ {
+		// Moonraker
+		if err := database.AddPrinter(1, fmt.Sprintf("Moon-%d", i), "127.0.0.1:7125", "MOONRAKER", fmt.Sprintf("MOON%03d", i), "", "", "", "", "", ""); err != nil {
+			log.Printf("❌ Failed to add Moonraker %d: %v", i, err)
+		}
+		// Bambu
+		if err := database.AddPrinter(1, fmt.Sprintf("Bambu-%d", i), "127.0.0.1", "BAMBULAB", fmt.Sprintf("BAMB%03d", i), "12345678", "bblp", "", "", "", `{"local_ip": "127.0.0.1"}`); err != nil {
+			log.Printf("❌ Failed to add Bambu %d: %v", i, err)
+		}
 	}
 
 	// Step C: Create a Job
