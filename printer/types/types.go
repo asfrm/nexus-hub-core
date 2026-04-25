@@ -1,5 +1,5 @@
-// Package printer provides a unified interface for multi-vendor 3D printer support
-package printer
+// Package types provides common printer-related types and interfaces
+package types
 
 import (
 	"context"

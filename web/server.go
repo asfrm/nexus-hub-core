@@ -11,9 +11,10 @@ import (
 	"net/http"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
-	"nexus-hub-core/moonraker"
 	"nexus-hub-core/parser"
-	printerpkg "nexus-hub-core/printer"
+	"nexus-hub-core/printer/bambu"
+	"nexus-hub-core/printer/moonraker"
+	"nexus-hub-core/printer/types"
 	"nexus-hub-core/slicer"
 	"os"
 	"path/filepath"
@@ -276,7 +277,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 
 					if p.PrinterType == "BAMBULAB" {
 						// 1. Setup Bambu Provider
-						config := printerpkg.PrinterConfig{
+						config := types.PrinterConfig{
 							PrinterID: p.ID,
 							Address:   p.IPAddress,
 							Extra: map[string]string{
@@ -285,7 +286,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 								"serial":      p.Serial,
 							},
 						}
-						provider := printerpkg.NewBambuProvider(config)
+						provider := bambu.NewBambuProvider(config)
 						ctx := context.Background()
 
 						if connErr := provider.Connect(ctx); connErr == nil {
@@ -294,7 +295,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 							// 2. Read file to bytes for the Bambu Provider
 							fileData, readErr := os.ReadFile(path)
 							if readErr == nil {
-								printJob := printerpkg.PrintJob{
+								printJob := types.PrintJob{
 									Filename: job.Filename,
 									FileData: fileData,
 								}
@@ -967,7 +968,7 @@ func handleSlicerUpload(database *db.Database, hub *api.Hub) http.HandlerFunc {
 }
 
 func sendBambuCommand(p db.Printer, action string, hub *api.Hub) {
-	config := printerpkg.PrinterConfig{
+	config := types.PrinterConfig{
 		PrinterID: p.ID,
 		Address:   p.IPAddress,
 		Extra: map[string]string{
@@ -976,7 +977,7 @@ func sendBambuCommand(p db.Printer, action string, hub *api.Hub) {
 			"serial":      p.Serial,
 		},
 	}
-	provider := printerpkg.NewBambuProvider(config)
+	provider := bambu.NewBambuProvider(config)
 
 	ctx := context.Background()
 	if err := provider.Connect(ctx); err != nil {
@@ -993,7 +994,7 @@ func sendBambuCommand(p db.Printer, action string, hub *api.Hub) {
 	}
 	defer provider.Disconnect()
 
-	var cmd printerpkg.PrinterCommand
+	var cmd types.PrinterCommand
 	switch action {
 	case "pause":
 		cmd.Type = "pause"
