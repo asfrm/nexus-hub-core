@@ -46,7 +46,7 @@ jobs:
         with:
           version: latest
           install-mode: goinstall
-          args: --timeout=5m
+          args: --config deploy/.golangci.yml --timeout=5m
 
       - name: Run tests
         run: go test -v -race ./...
@@ -103,6 +103,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: deploy/Dockerfile
           push: false
           tags: nexus-hub:verify
           build-args: |
