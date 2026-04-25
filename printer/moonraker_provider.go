@@ -247,7 +247,7 @@ func (m *MoonrakerProvider) UploadAndPrint(ctx context.Context, job PrintJob) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	file, err := os.Open(filepath.Join("gcode_vault", job.Filename))
+	file, err := os.Open(filepath.Join("uploads", job.Filename))
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}

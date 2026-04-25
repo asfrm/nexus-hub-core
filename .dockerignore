@@ -15,8 +15,8 @@ bambu_mqtt_dump.log
 build/
 dist/
 uploads/
-gcode_vault/
-!gcode_vault/.gitkeep
+uploads/
+!uploads/.gitkeep
 nexus-hub
 nexus-hub-core
 *.exe

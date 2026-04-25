@@ -15,7 +15,7 @@ import (
 
 func UploadGCodeHandler(database *db.Database, hub *api.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		uploadDir := "./gcode_vault"
+		uploadDir := "./uploads"
 		if err := os.MkdirAll(uploadDir, 0755); err != nil {
 			http.Error(w, "Failed to create upload directory", http.StatusInternalServerError)
 			return

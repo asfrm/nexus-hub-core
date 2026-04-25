@@ -282,8 +282,8 @@ func (b *BambuProvider) UploadAndPrint(ctx context.Context, job PrintJob) error 
 	}
 
 	// Prepare temp path for FTP upload
-	tempPath := filepath.Join("gcode_vault", fmt.Sprintf("temp_%d_%s", time.Now().UnixNano(), job.Filename))
-	if err := os.MkdirAll("gcode_vault", 0755); err != nil {
+	tempPath := filepath.Join("uploads", fmt.Sprintf("temp_%d_%s", time.Now().UnixNano(), job.Filename))
+	if err := os.MkdirAll("uploads", 0755); err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 

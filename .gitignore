@@ -26,9 +26,8 @@ hub.db-wal
 bambu_mqtt_dump.log
 
 # Uploads and G-Code
-uploads/
-gcode_vault/*
-!gcode_vault/.gitkeep
+uploads/*
+!uploads/.gitkeep
 
 # Coverage
 coverage.out

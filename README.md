@@ -55,7 +55,7 @@ nexus-hub-core/
 ├── slicer/             # G-code parsing and slicer integration
 ├── parser/             # Metadata extraction and file analysis
 ├── web/                # REST API and WebSocket server
-├── gcode_vault/        # Storage for uploaded G-code and thumbnails
+├── uploads/        # Storage for uploaded G-code and thumbnails
 ├── debug.html          # Built-in orchestration & monitoring panel
 ├── nexus-dev.sh        # Development automation script
 └── README.md           # This file

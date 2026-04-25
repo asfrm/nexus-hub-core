@@ -68,7 +68,7 @@ RUN addgroup -g 1000 nexus && \
     adduser -D -u 1000 -G nexus nexus
 
 # Create necessary directories
-RUN mkdir -p /app/data /app/gcode_vault /app/uploads && \
+RUN mkdir -p /app/data /app/uploads /app/uploads && \
     chown -R nexus:nexus /app
 
 # Set working directory
@@ -91,7 +91,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 USER nexus
 
 # Volume for persistent data
-VOLUME ["/app/data", "/app/gcode_vault"]
+VOLUME ["/app/data", "/app/uploads"]
 
 # Labels
 LABEL org.opencontainers.image.source="https://github.com/asfrm/nexus-hub-core" \

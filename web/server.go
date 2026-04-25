@@ -269,7 +269,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			}
 
 			if found {
-				filePath := filepath.Join("gcode_vault", job.Filename)
+				filePath := filepath.Join("uploads", job.Filename)
 
 				go func(p db.Printer, path string, id int64) {
 					var printErr error
@@ -509,7 +509,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			return
 		}
 
-		tempPath := filepath.Join("gcode_vault", "temp_"+handler.Filename)
+		tempPath := filepath.Join("uploads", "temp_"+handler.Filename)
 		dst, err := os.Create(tempPath)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -865,7 +865,7 @@ func handleSlicerUpload(database *db.Database, hub *api.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[SLICER GRABBER] Received upload from slicer")
 
-		uploadDir := "./gcode_vault"
+		uploadDir := "./uploads"
 
 		thumbnailDir := filepath.Join(uploadDir, "thumbnails")
 		if err := os.MkdirAll(uploadDir, 0755); err != nil {
