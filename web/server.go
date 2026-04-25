@@ -712,19 +712,16 @@ func handleSlicerUpload(database *db.Database, hub *api.Hub) http.HandlerFunc {
 		defer file.Close()
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
-		// Support all formats OrcaSlicer can provide
+		// Only accept slicer-processed files containing printer commands
 		allowedExts := map[string]bool{
 			".gcode":     true,
 			".g":         true,
 			".3mf":       true,
 			".gcode.3mf": true,
-			".stl":       true,
-			".obj":       true,
-			".zip":       true,
 		}
 
 		if !allowedExts[ext] && !strings.HasSuffix(strings.ToLower(handler.Filename), ".gcode.3mf") {
-			http.Error(w, "Invalid file type. Supported: .gcode, .3mf, .stl, .obj, .zip", http.StatusBadRequest)
+			http.Error(w, "Invalid file type. Supported: .gcode, .3mf (sliced only)", http.StatusBadRequest)
 			return
 		}
 

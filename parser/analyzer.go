@@ -1,4 +1,4 @@
-// Package parser provides 3MF, GCODE, and 3D model file analysis
+// Package parser provides analysis for slicer-processed files (GCODE and Sliced 3MF)
 package parser
 
 import (
@@ -52,11 +52,14 @@ type AnalysisResult struct {
 	HasMultiColor  bool    `json:"has_multi_color"`
 	ColorCount     int     `json:"color_count"`
 	PrinterModel   string  `json:"printer_model"`
+	IsSliced       bool    `json:"is_sliced"`
 }
 
-// AnalyzeFile analyzes a wide range of slicer and 3D model formats
+// AnalyzeFile analyzes GCODE and Sliced 3MF files
 func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
+
+	// Handle special .gcode.3mf case
 	if strings.HasSuffix(strings.ToLower(filePath), ".gcode.3mf") {
 		return analyze3MF(filePath, uploadDir)
 	}
@@ -66,35 +69,17 @@ func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 		return analyze3MF(filePath, uploadDir)
 	case ".gcode", ".g":
 		return analyzeGCODE(filePath, uploadDir)
-	case ".stl", ".obj", ".zip":
-		return analyzeGeneric(filePath)
 	default:
-		// Try generic analysis for any other file
-		return analyzeGeneric(filePath)
+		return nil, fmt.Errorf("unsupported file type: %s. Only slicer-processed files (.gcode, .3mf) are supported", ext)
 	}
 }
 
-// analyzeGeneric provides basic info for formats without embedded slicing metadata
-func analyzeGeneric(filePath string) (*AnalysisResult, error) {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	return &AnalysisResult{
-		Filename:     filepath.Base(filePath),
-		FileSize:     info.Size(),
-		FilamentType: "Unknown",
-		PrinterModel: "Generic",
-	}, nil
-}
-
-// analyze3MF parses a 3MF file (ZIP archive) for metadata and thumbnails
+// analyze3MF parses a 3MF file and verifies it is a SLICED file
 func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	result := &AnalysisResult{
 		Filename:     filepath.Base(filePath),
-		FilamentType: "PLA",
-		PrinterModel: "Generic",
+		FilamentType: "Unknown",
+		PrinterModel: "Unknown",
 	}
 
 	info, err := os.Stat(filePath)
@@ -108,11 +93,25 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	}
 	defer r.Close()
 
+	hasSlicingConfig := false
+	hasGCode := false
+
 	for _, f := range r.File {
-		// Extract thumbnail (support both Bambu and Orca paths)
+		// Sliced 3MFs (Orca/Bambu) MUST contain these or similar entries
+		if strings.Contains(f.Name, "Metadata/slice_info") ||
+			strings.Contains(f.Name, "Metadata/model.metadata") ||
+			strings.Contains(f.Name, "metadata.xml") {
+			hasSlicingConfig = true
+		}
+
+		// Check for presence of G-code within the archive (the real payload)
+		if strings.HasSuffix(f.Name, ".gcode") {
+			hasGCode = true
+		}
+
+		// Extract thumbnail
 		if (strings.Contains(f.Name, "Metadata/plate_") || strings.Contains(f.Name, ".png")) &&
 			(strings.HasSuffix(f.Name, ".png") || strings.HasSuffix(f.Name, ".jpg")) {
-			// Save thumbnail to the static uploads/thumbnails directory
 			safeName := strings.ReplaceAll(f.Name, "/", "_")
 			thumbnailPath := filepath.Join(uploadDir, "thumbnails", safeName)
 			if err := extractFile(f, thumbnailPath); err == nil {
@@ -120,20 +119,18 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 			}
 		}
 
-		// Parse metadata XML
+		// Parse metadata XML (Priority to model.metadata.3mf as it contains more detail)
 		if strings.HasSuffix(f.Name, "metadata.xml") || strings.HasSuffix(f.Name, "model.metadata.3mf") {
 			_ = parseMetadata(f, result)
 		}
-
-		// Check for multi-color
-		if strings.HasSuffix(f.Name, "model.metadata.3mf") {
-			if colors, err := countColors(f); err == nil {
-				result.ColorCount = colors
-				result.HasMultiColor = colors > 1
-			}
-		}
 	}
 
+	// VALIDATION: If no slicing config or G-code found, it's a raw 3D model
+	if !hasSlicingConfig && !hasGCode {
+		return nil, fmt.Errorf("file is a raw 3D model, not a sliced printer file")
+	}
+
+	result.IsSliced = true
 	return result, nil
 }
 
@@ -143,6 +140,7 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 		Filename:     filepath.Base(filePath),
 		FilamentType: "PLA",
 		PrinterModel: "Generic",
+		IsSliced:     true,
 	}
 
 	info, err := os.Stat(filePath)
@@ -157,9 +155,8 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
-	// Only scan the first 64KB for performance
 	linesRead := 0
-	for scanner.Scan() && linesRead < 2000 {
+	for scanner.Scan() && linesRead < 5000 {
 		linesRead++
 		line := scanner.Text()
 		if !strings.HasPrefix(line, ";") {
@@ -168,35 +165,24 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 
 		line = strings.TrimSpace(line)
 
-		// Time Estimation
 		if strings.Contains(line, "estimated printing time") {
 			result.EstimatedTimeS = parseTimeEstimate(line)
 		}
-
-		// Filament Weight
 		if strings.Contains(line, "filament used") && strings.Contains(line, "[g]") {
 			result.FilamentWeight = parseFilamentUsed(line)
 		}
-
-		// Filament Type
 		if strings.Contains(line, "filament_type") {
 			result.FilamentType = extractValue(line)
 		}
-
-		// Printer Model
 		if strings.Contains(line, "printer_model") || strings.Contains(line, "model_id") {
 			result.PrinterModel = extractValue(line)
 		}
-
-		// Temperatures
 		if strings.Contains(line, "nozzle_temperature") || strings.Contains(line, "temperature") {
 			_, _ = fmt.Sscanf(extractValue(line), "%f", &result.NozzleTemp)
 		}
 		if strings.Contains(line, "bed_temperature") {
 			_, _ = fmt.Sscanf(extractValue(line), "%f", &result.BedTemp)
 		}
-
-		// Layer Height
 		if strings.Contains(line, "layer_height") {
 			fmt.Sscanf(extractValue(line), "%f", &result.LayerHeight)
 		}
@@ -220,7 +206,6 @@ func extractValue(line string) string {
 	return ""
 }
 
-// parseMetadata extracts slicing information from metadata XML
 func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	rc, err := file.Open()
 	if err != nil {
@@ -240,10 +225,18 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 
 	if len(metadata.Slicing.Plate) > 0 {
 		plate := metadata.Slicing.Plate[0]
-		result.EstimatedTimeS = plate.PrintTime
-		result.FilamentWeight = plate.FilamentWeight
-		result.LayerHeight = plate.LayerHeight
-		result.Infill = plate.Infill
+		if plate.PrintTime > 0 {
+			result.EstimatedTimeS = plate.PrintTime
+		}
+		if plate.FilamentWeight > 0 {
+			result.FilamentWeight = plate.FilamentWeight
+		}
+		if plate.LayerHeight > 0 {
+			result.LayerHeight = plate.LayerHeight
+		}
+		if plate.Infill != "" {
+			result.Infill = plate.Infill
+		}
 		if plate.NozzleTemper > 0 {
 			result.NozzleTemp = plate.NozzleTemper
 		}
@@ -253,22 +246,13 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	}
 
 	if len(metadata.Materials) > 0 {
-		result.FilamentType = metadata.Materials[0].Type
+		// Use the material type if we don't have one yet
+		if result.FilamentType == "Unknown" || result.FilamentType == "" {
+			result.FilamentType = metadata.Materials[0].Type
+		}
 	}
 
 	return nil
-}
-
-func countColors(file *zip.File) (int, error) {
-	rc, err := file.Open()
-	if err != nil {
-		return 0, err
-	}
-	defer rc.Close()
-	data, _ := io.ReadAll(rc)
-	var metadata ThreeMFMetadata
-	_ = xml.Unmarshal(data, &metadata)
-	return len(metadata.Materials), nil
 }
 
 func extractFile(file *zip.File, destPath string) error {
@@ -296,7 +280,6 @@ func parseTimeEstimate(line string) int64 {
 	timeStr := strings.TrimSpace(parts[1])
 
 	var total int64
-	// Handle format: 2h 15m 30s
 	hParts := strings.Split(timeStr, "h")
 	if len(hParts) > 1 {
 		h, _ := strconv.ParseInt(strings.TrimSpace(hParts[0]), 10, 64)
