@@ -19,6 +19,8 @@ dist/
 hub.db
 hub.db-shm
 hub.db-wal
+*.db-shm
+*.db-wal
 *.sqlite
 
 # Logs

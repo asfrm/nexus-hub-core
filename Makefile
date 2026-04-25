@@ -180,6 +180,9 @@ clean:
 	rm -f $(BINARY_NAME)
 	rm -f *.out
 	rm -f *.html
+	rm -f *.db
+	rm -f *.db-shm
+	rm -f *.db-wal
 	rm -rf dist/
 	rm -rf uploads/
 	@echo "$(YELLOW)Clean complete$(NC)"
