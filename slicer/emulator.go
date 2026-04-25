@@ -1,6 +1,7 @@
 package slicer
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,16 +9,20 @@ import (
 	"nexus-hub-core/db"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-func UploadGCodeHandler(database *db.Database, tx chan api.NexusPacket) http.HandlerFunc {
+func UploadGCodeHandler(database *db.Database, hub *api.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		uploadDir := "./gcode_vault"
-		os.MkdirAll(uploadDir, 0755)
+		if err := os.MkdirAll(uploadDir, 0755); err != nil {
+			http.Error(w, "Failed to create upload directory", http.StatusInternalServerError)
+			return
+		}
 
-		// Читаем multipart форму
-		r.ParseMultipartForm(100 << 20) // 100MB лимит
+		// Read multipart form with 100MB limit
+		r.ParseMultipartForm(100 << 20)
 		file, handler, err := r.FormFile("file")
 		if err != nil {
 			http.Error(w, "Upload error", http.StatusBadRequest)
@@ -25,27 +30,51 @@ func UploadGCodeHandler(database *db.Database, tx chan api.NexusPacket) http.Han
 		}
 		defer file.Close()
 
+		// Validate file extension
+		ext := strings.ToLower(filepath.Ext(handler.Filename))
+		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && ext != ".bgcode" {
+			http.Error(w, "Invalid file type.", http.StatusBadRequest)
+			return
+		}
 		dstPath := filepath.Join(uploadDir, handler.Filename)
-		dst, _ := os.Create(dstPath)
+		dst, err := os.Create(dstPath)
+		if err != nil {
+			http.Error(w, "Failed to save file", http.StatusInternalServerError)
+			return
+		}
 		defer dst.Close()
-		io.Copy(dst, file)
 
-		// Парсим и сохраняем
+		if _, err := io.Copy(dst, file); err != nil {
+			http.Error(w, "Failed to save file", http.StatusInternalServerError)
+			return
+		}
+
+		// Parse and save metadata
 		meta := ParseGCodeMetadata(dstPath)
-		_ = database.AddPrintJob(handler.Filename, meta.FilamentType, meta.PrinterModel, meta.EstimatedTimeS)
+		if err := database.AddPrintJob(handler.Filename, meta.FilamentType, meta.PrinterModel, meta.EstimatedTimeS); err != nil {
+			http.Error(w, "Failed to create print job", http.StatusInternalServerError)
+			return
+		}
 
-		// Лог в систему (теперь с указанием кластера!)
-		tx <- api.NexusPacket{
+		// Log to system
+		hub.Send(api.NexusPacket{
 			EventType: "SYSTEM_LOG",
 			Log: &api.LogPayload{
 				Module:    "SLICER",
 				Level:     "INFO",
-				Message:   fmt.Sprintf("Задача '%s' принята для кластера: [%s] (Пластик: %s)", handler.Filename, meta.PrinterModel, meta.FilamentType),
+				Message:   fmt.Sprintf("Task '%s' accepted for cluster: [%s] (Filament: %s)", handler.Filename, meta.PrinterModel, meta.FilamentType),
 				Timestamp: time.Now(),
 			},
-		}
+		})
 
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"result": {"action": "upload", "item": {"path": "%s"}}}`, handler.Filename)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"action": "upload",
+				"item": map[string]string{
+					"path": handler.Filename,
+				},
+			},
+		})
 	}
 }

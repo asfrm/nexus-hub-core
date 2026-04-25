@@ -1,1 +1,50 @@
+# IDE and Editors
 .aider*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Go build artifacts
+*.exe
+*.test
+*.out
+nexus-hub
+nexus-hub-core
+build/
+dist/
+
+# Database
+hub.db
+hub.db-shm
+hub.db-wal
+*.sqlite
+
+# Logs
+*.log
+bambu_mqtt_dump.log
+
+# Uploads and G-Code
+uploads/
+gcode_vault/*
+!gcode_vault/.gitkeep
+
+# Coverage
+coverage.out
+coverage.html
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+.env
+.env.local
+
+# Node modules (if any frontend is added back)
+node_modules/
+
+# Build artifacts
+*.tar.gz
+*.zip

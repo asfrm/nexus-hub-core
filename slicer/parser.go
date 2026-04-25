@@ -59,8 +59,8 @@ func ParseGCodeMetadata(filepath string) PrintJobMeta {
 	// Финальная проверка: если всё равно "Unknown",
 	// но мы нашли что-то похожее на PETG/PLA в строке, можно добавить доп. логику
 	if meta.PrinterModel == "Unknown" || meta.FilamentType == "Unknown" {
-		// Additional logic to check for PETG/PLA in the lines read
-		// and update meta.FilamentType if found
+		// Fallback detection if needed
+		meta.FilamentType = "PLA" // Default to PLA if unknown
 	}
 	return meta
 }

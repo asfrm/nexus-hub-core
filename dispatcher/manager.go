@@ -1,31 +1,29 @@
 package dispatcher
 
 import (
+	"context"
+	"log"
 	"nexus-hub-core/api"
-	"nexus-hub-core/db" // Наш новый клиент
+	"nexus-hub-core/db"
 	"sync/atomic"
 	"time"
 )
 
-// Глобальный переключатель (true = Авто, false = Ручной)
+// AutoMode controls automatic job assignment (true = Auto, false = Manual)
 var AutoMode atomic.Bool
 
-func StartDispatching(database *db.Database, tx chan api.NexusPacket) {
-	ticker := time.NewTicker(5 * time.Second)
+func StartDispatching(ctx context.Context, database *db.Database, hub *api.Hub) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
-	for range ticker.C {
-		// 1. Получаем все кластеры
-		clusters, _ := database.GetClustersWithPrinters()
-
-		for _, cluster := range clusters {
-			// ЕСЛИ КЛАСТЕР ВЫКЛЮЧЕН — ПРОПУСКАЕМ
-			if !cluster.IsEnabled {
-				continue
-			}
-
-			// Ищем задачу для этого кластера (по модели)
-			// (Здесь можно добавить метод GetNextJobForCluster)
-			// Пока оставим логику ручного назначения, она приоритетнее.
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Dispatcher shutting down...")
+			return
+		case <-ticker.C:
+			// Periodic maintenance tasks
+			log.Printf("Dispatcher heartbeat - AutoMode: %v", AutoMode.Load())
 		}
 	}
 }

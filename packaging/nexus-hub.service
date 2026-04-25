@@ -1,0 +1,31 @@
+[Unit]
+Description=Nexus Hub Core - 3D Printing Farm Orchestration
+Documentation=https://github.com/asfrm/nexus-hub-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+ExecStart=/usr/local/bin/nexus-hub -debug
+Restart=on-failure
+RestartSec=5s
+WorkingDirectory=/opt/nexus-hub
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/nexus-hub/data /opt/nexus-hub/gcode_vault /opt/nexus-hub/uploads
+
+# Networking
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexus-hub
+
+[Install]
+WantedBy=multi-user.target

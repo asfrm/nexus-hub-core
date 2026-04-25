@@ -1,43 +1,91 @@
 package api
 
 import (
+	"context"
+	"sync"
 	"time"
 )
 
-type CpuCore struct {
-	ID           int     `json:"id"`
-	FrequencyMHz uint64  `json:"frequency_mhz"`
-	UsagePercent float32 `json:"usage_percent"`
-}
-
-type HostHardwareState struct {
-	CPUModel       string    `json:"cpu_model"`
-	CPUUsageTotal  float32   `json:"cpu_usage_total"`
-	CPUPackageTemp float32   `json:"cpu_package_temp"`
-	CPUCores       []CpuCore `json:"cpu_cores"`
-	GPUName        string    `json:"gpu_name"`
-	GPULoadPercent float32   `json:"gpu_load_percent"`
-	GPUMemUsedMB   uint64    `json:"gpu_mem_used_mb"`
-	GPUMemTotalMB  uint64    `json:"gpu_mem_total_mb"`
-	GPUTempCelsius float32   `json:"gpu_temp_celsius"`
-	GPUPowerWatts  float32   `json:"gpu_power_watts"`
-	GPUFanSpeedRPM uint32    `json:"gpu_fan_speed_rpm"`
-	RAMUsedMB      uint64    `json:"ram_used_mb"`
-	RAMTotalMB     uint64    `json:"ram_total_mb"`
-	Uptime         string    `json:"uptime_formatted"`
-}
-
-// NexusPacket в Go реализуется через общую структуру, 
-// так как в Go нет Enum с данными (как в Rust)
+// NexusPacket represents a message in the system
 type NexusPacket struct {
-	EventType string             `json:"event_type"`
-	Payload   interface{}        `json:"payload"`
-	Log       *LogPayload        `json:"log,omitempty"`
+	EventType string      `json:"event_type"`
+	Payload   interface{} `json:"payload"`
+	Log       *LogPayload `json:"log,omitempty"`
 }
 
+// LogPayload contains log message data
 type LogPayload struct {
 	Module    string    `json:"module"`
 	Message   string    `json:"message"`
 	Level     string    `json:"level"`
 	Timestamp time.Time `json:"timestamp"`
+}
+
+// Hub manages pub-sub broadcasting to multiple subscribers
+type Hub struct {
+	subscribers  map[chan NexusPacket]bool
+	internalChan chan NexusPacket
+	mu           sync.RWMutex
+}
+
+// NewHub creates a new Hub instance
+func NewHub() *Hub {
+	return &Hub{
+		subscribers:  make(map[chan NexusPacket]bool),
+		internalChan: make(chan NexusPacket, 100),
+	}
+}
+
+// Run starts the hub's main loop
+func (h *Hub) Run(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		h.Close()
+	}()
+}
+
+// Subscribe creates a new subscriber channel
+func (h *Hub) Subscribe() <-chan NexusPacket {
+	ch := make(chan NexusPacket, 100)
+	h.mu.Lock()
+	h.subscribers[ch] = true
+	h.mu.Unlock()
+	return ch
+}
+
+// Publish sends a packet to all subscribers
+func (h *Hub) Publish(packet NexusPacket) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for ch := range h.subscribers {
+		select {
+		case ch <- packet:
+		default:
+			// Skip slow subscribers to avoid blocking
+		}
+	}
+}
+
+// GetInternalChan returns the internal channel for sending packets
+func (h *Hub) GetInternalChan() <-chan NexusPacket {
+	return h.internalChan
+}
+
+// Send publishes a packet to the internal channel and all subscribers
+func (h *Hub) Send(packet NexusPacket) {
+	h.internalChan <- packet
+	h.Publish(packet)
+}
+
+// Close shuts down the hub and closes all subscriber channels
+func (h *Hub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for ch := range h.subscribers {
+		close(ch)
+		delete(h.subscribers, ch)
+	}
+	close(h.internalChan)
 }
