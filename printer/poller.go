@@ -6,6 +6,8 @@ import (
 	"log"
 	"nexus-hub-core/api"
 	"nexus-hub-core/db"
+	"nexus-hub-core/printer/bambu"
+	"nexus-hub-core/printer/types"
 	"sync"
 	"time"
 )
@@ -17,7 +19,7 @@ type Poller struct {
 	interval       time.Duration
 	mu             sync.Mutex
 	stopCh         chan struct{}
-	bambuProviders map[int64]*BambuProvider
+	bambuProviders map[int64]*bambu.BambuProvider
 }
 
 // NewPoller creates a new printer status poller
@@ -27,7 +29,7 @@ func NewPoller(database *db.Database, hub *api.Hub) *Poller {
 		hub:            hub,
 		interval:       5 * time.Second,
 		stopCh:         make(chan struct{}),
-		bambuProviders: make(map[int64]*BambuProvider),
+		bambuProviders: make(map[int64]*bambu.BambuProvider),
 	}
 }
 
@@ -80,7 +82,7 @@ func (p *Poller) pollBambuPrinter(ctx context.Context, printer db.Printer) {
 	provider, exists := p.bambuProviders[printer.ID]
 	if !exists {
 		// Create new Bambu provider
-		config := PrinterConfig{
+		config := types.PrinterConfig{
 			PrinterID: printer.ID,
 			Address:   printer.IPAddress,
 			Extra: map[string]string{
@@ -89,19 +91,19 @@ func (p *Poller) pollBambuPrinter(ctx context.Context, printer db.Printer) {
 				"serial":      printer.Serial,
 			},
 		}
-		provider = NewBambuProvider(config)
+		provider = bambu.NewBambuProvider(config)
 
 		// Connect to printer
 		if err := provider.Connect(ctx); err != nil {
 			p.mu.Unlock()
-			log.Printf("[BAMBU POLLER] Failed to connect to %s: %v", printer.Name, err)
+			log.Printf("[BAMBU] Failed to connect to %s: %v", printer.Name, err)
 			return
 		}
 
 		p.bambuProviders[printer.ID] = provider
 
 		// Start status listener goroutine using SDK's update channel
-		go func(id int64, name string, prov *BambuProvider) {
+		go func(id int64, name string, prov *bambu.BambuProvider) {
 			sdkPrinter := prov.GetPrinter()
 			updateChan := sdkPrinter.GetUpdateChannel()
 

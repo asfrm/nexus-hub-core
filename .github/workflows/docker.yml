@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'Dockerfile'
+      - 'deploy/Dockerfile'
       - '**.go'
       - 'go.mod'
       - 'go.sum'
@@ -35,6 +35,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: deploy/Dockerfile
           platforms: linux/amd64
           push: false
           load: true

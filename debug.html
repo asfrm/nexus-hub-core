@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus Hub Core - Debug Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            display: flex;
+            gap: 20px;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .main-col { flex: 2; overflow-y: auto; padding-right: 10px; }
+        .side-col { flex: 1; display: flex; flex-direction: column; gap: 20px; overflow: hidden; }
+        h1 { color: #4ec9b0; margin-bottom: 20px; font-size: 24px; }
+        h2 { color: #569cd6; margin: 15px 0 10px; font-size: 18px; border-bottom: 1px solid #3e3e42; padding-bottom: 5px; }
+        h3 { color: #dcdcaa; font-size: 14px; margin: 10px 0 5px; }
+        .panel {
+            background: #252526;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .status { 
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .status.connected { background: #16825d; color: #fff; }
+        .status.disconnected { background: #a1260d; color: #fff; }
+        .status.error { background: #f48771; color: #1e1e1e; }
+        pre {
+            background: #1e1e1e;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        #api-response { flex: 1; overflow-y: auto; border: 1px solid #3e3e42; margin-top: 10px; }
+        button {
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 3px;
+            cursor: pointer;
+            margin: 5px 5px 5px 0;
+            font-size: 12px;
+        }
+        button:hover { background: #1177bb; }
+        button.btn-red { background: #a1260d; }
+        button.btn-red:hover { background: #c53012; }
+        button.btn-green { background: #16825d; }
+        button.btn-green:hover { background: #1a966a; }
+        input, select, textarea {
+            background: #3c3c3c;
+            color: #d4d4d4;
+            border: 1px solid #3e3e42;
+            padding: 6px 10px;
+            border-radius: 3px;
+            margin: 2px 0;
+            font-family: inherit;
+            font-size: 12px;
+            width: 100%;
+        }
+        form {
+            background: #1e1e1e;
+            padding: 10px;
+            border: 1px dashed #3e3e42;
+            margin-bottom: 15px;
+            border-radius: 4px;
+        }
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .form-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+        label { display: block; font-size: 11px; color: #9cdcfe; margin-bottom: 2px; }
+        .log-entry { margin: 2px 0; font-size: 11px; }
+        .log-info { color: #4ec9b0; }
+        .log-error { color: #f48771; }
+        .log-warn { color: #dcdcaa; }
+        #ws-log { height: 200px; overflow-y: auto; border: 1px solid #3e3e42; margin-top: 10px; }
+        
+        /* Modal Styles */
+        #ams-modal {
+            display: none; 
+            position: fixed; 
+            top: 0; left: 0; 
+            width: 100%; height: 100%; 
+            background: rgba(0,0,0,0.7); 
+            z-index: 1000; 
+            justify-content: center; 
+            align-items: center;
+        }
+        .ams-slot-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px;
+            background: #1e1e1e;
+            border: 1px solid #3e3e42;
+            margin-bottom: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .ams-slot-row:hover { background: #2d2d30; }
+        .color-box {
+            display: inline-block;
+            width: 20px; height: 20px;
+            border: 1px solid #fff;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-col">
+        <h1>🔧 Nexus Hub Core - Debug Panel</h1>
+
+        <div class="panel">
+            <h2>System Health & Stats</h2>
+            <div id="health-status">
+                <span class="status disconnected">Checking...</span>
+            </div>
+            <div style="margin-top: 10px;">
+                <button onclick="checkHealth()">Refresh Health</button>
+                <button onclick="fetchData('/api/health')">GET /api/health</button>
+                <button onclick="fetchData('/api/stats')">GET /api/stats</button>
+                <button onclick="fetchData('/api/analytics')">GET /api/analytics</button>
+                <button onclick="fetchData('/api/history')">GET /api/history</button>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>Clusters Management</h2>
+            <button onclick="fetchData('/api/clusters')">GET /api/clusters</button>
+
+            <form onsubmit="submitForm(event, '/api/clusters/create', 'POST', 'json')">
+                <h3>Create Cluster</h3>
+                <div class="form-grid">
+                    <div><label>Name</label><input type="text" name="name" required></div>
+                    <div><label>Target Model</label><input type="text" name="target_model" placeholder="e.g. Bambu Lab X1C"></div>
+                </div>
+                <button type="submit">Create</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/clusters/toggle', 'GET', 'query')">
+                <h3>Toggle Cluster</h3>
+                <div class="form-grid">
+                    <div><label>Cluster ID</label><input type="number" name="id" required></div>
+                    <div><label>Enabled</label><select name="enabled"><option value="true">True</option><option value="false">False</option></select></div>
+                </div>
+                <button type="submit">Toggle</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/clusters/delete', 'GET', 'query')">
+                <h3>Delete Cluster</h3>
+                <div class="form-grid">
+                    <div><label>Cluster ID</label><input type="number" name="id" required></div>
+                </div>
+                <button type="submit" class="btn-red">Delete</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>Printers Management</h2>
+            <button onclick="fetchData('/api/bambu/discover')">Discover Bambu Printers (LAN)</button>
+            <button onclick="fetchData('/api/printers/wear')">Get Wear Stats</button>
+            
+            <form onsubmit="submitForm(event, '/api/printers/add', 'POST', 'json')">
+                <h3>Add Standard Printer (Moonraker/Custom)</h3>
+                <div class="form-grid cols-3">
+                    <div><label>Cluster ID</label><input type="number" name="cluster_id" required></div>
+                    <div><label>Name</label><input type="text" name="name" required></div>
+                    <div><label>IP Address</label><input type="text" name="ip_address" required></div>
+                    <div><label>Type</label><select name="printer_type"><option value="MOONRAKER">MOONRAKER</option><option value="BAMBULAB">BAMBULAB</option></select></div>
+                    <div><label>Serial</label><input type="text" name="serial"></div>
+                    <div><label>Access Code</label><input type="text" name="access_code"></div>
+                    <div style="grid-column: span 3;"><label>Extra (JSON string)</label><input type="text" name="extra" placeholder='{"local_ip": "1.2.3.4"}'></div>
+                </div>
+                <button type="submit">Add Printer</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/bambu/bind', 'POST', 'json')">
+                <h3>Bind Bambu Lab Printer (LAN Mode)</h3>
+                <div class="form-grid cols-3">
+                    <div><label>IP Address</label><input type="text" name="ip_address" required></div>
+                    <div><label>Serial</label><input type="text" name="serial" required></div>
+                    <div><label>Access Code (PIN)</label><input type="text" name="access_code" placeholder="8-char PIN" required></div>
+                    <div><label>Name</label><input type="text" name="name" required></div>
+                    <div><label>Model</label><input type="text" name="model" required></div>
+                    <div><label>Cluster ID</label><input type="number" name="cluster_id" required></div>
+                </div>
+                <button type="submit">Bind Bambu Printer</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/printers/control', 'GET', 'query')">
+                <h3>Control Printer</h3>
+                <div class="form-grid">
+                    <div><label>Printer ID</label><input type="number" name="id" required></div>
+                    <div>
+                        <label>Action</label>
+                        <select name="action">
+                            <option value="pause">Pause</option>
+                            <option value="resume">Resume</option>
+                            <option value="stop">Stop</option>
+                            <option value="g28">Home (G28)</option>
+                            <option value="light_on">Light On</option>
+                            <option value="light_off">Light Off</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="submit">Send Command</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>Bambu Accounts</h2>
+            <button onclick="fetchData('/api/bambu/accounts')">List Bambu Accounts</button>
+            
+            <form onsubmit="submitForm(event, '/api/bambu/login', 'POST', 'json')">
+                <h3>Add Bambu Account (Legacy/LAN)</h3>
+                <div class="form-grid">
+                    <div><label>Email</label><input type="email" name="email" required></div>
+                    <div><label>Password/AccessCode</label><input type="password" name="password" required></div>
+                    <div><label>Region</label><select name="region"><option value="US">US</option><option value="EU">EU</option><option value="CN">CN</option><option value="LAN">LAN</option></select></div>
+                </div>
+                <button type="submit">Save Account</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/bambu/verify-2fa', 'POST', 'json')">
+                <h3>Verify 2FA</h3>
+                <div class="form-grid">
+                    <div><label>Email</label><input type="email" name="email" required></div>
+                    <div><label>2FA Code</label><input type="text" name="code" required></div>
+                </div>
+                <button type="submit">Verify</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/bambu/account/delete', 'GET', 'query')">
+                <h3>Delete Bambu Account</h3>
+                <div class="form-grid">
+                    <div><label>Account ID</label><input type="number" name="id" required></div>
+                </div>
+                <button type="submit" class="btn-red">Delete Account</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>Jobs & Vault</h2>
+            <button onclick="fetchData('/api/jobs')">Get Pending Jobs</button>
+            <button onclick="fetchData('/api/jobs/list')">Get Active Jobs</button>
+            <button onclick="fetchData('/api/jobs/completed')">Get Completed Jobs</button>
+
+            <form onsubmit="submitForm(event, '/api/jobs/assign', 'POST', 'json')">
+                <h3>Assign Job to Printer</h3>
+                <div class="form-grid cols-3">
+                    <div><label>Job ID</label><input type="number" name="job_id" required></div>
+                    <div><label>Cluster ID</label><input type="number" name="cluster_id" required></div>
+                    <div><label>Printer ID</label><input type="number" name="printer_id" required></div>
+                </div>
+                <button type="submit" class="btn-green">Assign & Start Print</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>Files & Slicer Connect</h2>
+            <button onclick="fetchData('/api/setup/unassigned')">Get Unassigned Setup Models</button>
+
+            <form onsubmit="submitForm(event, '/api/setup/analyze-gcode', 'POST', 'file')">
+                <h3>Analyze G-Code</h3>
+                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g"></div>
+                <button type="submit">Upload & Analyze</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/files/local', 'POST', 'file')">
+                <h3>Upload Print Job (OctoPrint/Slicer API)</h3>
+                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g,.3mf"></div>
+                <button type="submit">Upload to Vault</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/server/files/upload', 'POST', 'file')">
+                <h3>Upload to Moonraker API (/server/files/upload)</h3>
+                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g"></div>
+                <button type="submit">Upload</button>
+            </form>
+        </div>
+
+        <div class="panel">
+            <h2>Filament Spools</h2>
+            <button onclick="fetchData('/api/spools')">Get All Spools</button>
+
+            <form onsubmit="submitForm(event, '/api/spools', 'POST', 'json')">
+                <h3>Add Spool</h3>
+                <div class="form-grid cols-3">
+                    <div><label>Material</label><input type="text" name="material" required placeholder="e.g. PLA"></div>
+                    <div><label>Color</label><input type="text" name="color" placeholder="e.g. Red"></div>
+                    <div><label>Color Hex</label><input type="text" name="color_hex" placeholder="#FF0000"></div>
+                    <div><label>Total Weight (g)</label><input type="number" step="0.1" name="total_weight_g" required></div>
+                    <div><label>Assigned Printer ID</label><input type="number" name="assigned_printer_id" placeholder="0 if none"></div>
+                </div>
+                <button type="submit">Add Spool</button>
+            </form>
+        </div>
+        
+        <div style="height: 50px;"></div>
+    </div>
+
+    <!-- Side Column for Logs and Responses -->
+    <div class="side-col">
+        <div class="panel" style="flex: 1; display: flex; flex-direction: column; margin-bottom: 0;">
+            <h2>API Response Data</h2>
+            <div style="margin-bottom: 10px;">
+                <input type="text" id="manual-endpoint" placeholder="/api/endpoint" style="width: calc(100% - 110px); display: inline-block;">
+                <button onclick="fetchManual()" style="width: 100px;">Send GET</button>
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column;">
+                <label>POST Data (for manual requests)</label>
+                <textarea id="manual-body" style="height: 80px; margin-bottom: 5px;" placeholder='{"key": "value"}'></textarea>
+                <button onclick="fetchManual('POST')" class="btn-green">Send POST (JSON)</button>
+            </div>
+            <pre id="api-response">// Responses will appear here...</pre>
+        </div>
+
+        <div class="panel" style="height: 300px; display: flex; flex-direction: column;">
+            <h2>WebSocket Live Log</h2>
+            <div>
+                Status: <span id="ws-status" class="status disconnected">Disconnected</span>
+                <button onclick="connectWS()" style="margin-left: 10px;">Connect</button>
+                <button onclick="disconnectWS()">Disconnect</button>
+            </div>
+            <pre id="ws-log">// Event stream...</pre>
+        </div>
+    </div>
+
+    <!-- AMS Selection Modal -->
+    <div id="ams-modal">
+        <div class="panel" style="width: 450px; max-width: 90%;">
+            <h2>Select AMS Spool</h2>
+            <p style="font-size: 12px; margin-bottom: 15px; color: #9cdcfe;">Printer has AMS data. Select which slot to use:</p>
+            <div id="ams-spools-container" style="max-height: 300px; overflow-y: auto; margin-bottom: 15px;"></div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button class="btn-red" onclick="cancelAmsSelection()">Cancel</button>
+                <button onclick="confirmAmsSelection()">Confirm & Print</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let ws = null;
+        const printerAmsData = {}; // Track AMS data by printer ID
+        let pendingAssignRequest = null; // Hold request pending AMS selection
+
+        function wsLog(msg, type = 'info') {
+            const logEl = document.getElementById('ws-log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            logEl.appendChild(entry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/api/health`);
+                const data = await res.json();
+                const statusEl = document.getElementById('health-status');
+                const status = data.status === 'healthy' ? 'connected' : 'error';
+                statusEl.innerHTML = `<span class="status ${status}">${data.status}</span>
+                    &nbsp;&nbsp; v${data.version} &nbsp;|&nbsp; Uptime: ${data.uptime} &nbsp;|&nbsp; DB: ${data.database} &nbsp;|&nbsp; Printers: ${data.printers}`;
+            } catch (err) {
+                document.getElementById('health-status').innerHTML = 
+                    `<span class="status error">Error: ${err.message}</span>`;
+            }
+        }
+
+        function connectWS() {
+            if (ws) return wsLog('Already connected', 'warn');
+            const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
+            wsLog(`Connecting to ${wsUrl}...`);
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                wsLog('Connected', 'info');
+                document.getElementById('ws-status').textContent = 'Connected';
+                document.getElementById('ws-status').className = 'status connected';
+            };
+            ws.onclose = () => {
+                wsLog('Disconnected', 'error');
+                ws = null;
+                document.getElementById('ws-status').textContent = 'Disconnected';
+                document.getElementById('ws-status').className = 'status disconnected';
+            };
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    // Intercept PRINTER_STATUS to store AMS info globally
+                    if (data.event_type === 'PRINTER_STATUS' && data.payload) {
+                        const pid = data.payload.printer_id || data.payload.id;
+                        if (pid && data.payload.ams_data) {
+                            printerAmsData[pid] = data.payload.ams_data;
+                        }
+                    }
+
+                    wsLog(`[${data.event_type}] ${JSON.stringify(data.payload || data.log || {})}`, 'info');
+                } catch (e) {
+                    wsLog(event.data, 'info');
+                }
+            };
+            ws.onerror = (err) => wsLog(`WS Error`, 'error');
+        }
+
+        function disconnectWS() { if (ws) ws.close(); }
+
+        async function fetchData(endpoint) {
+            wsLog(`GET ${endpoint}`, 'info');
+            return executeFetch(API_BASE + endpoint, { method: 'GET' });
+        }
+
+        async function fetchManual(method = 'GET') {
+            const ep = document.getElementById('manual-endpoint').value;
+            if (!ep) return;
+            
+            const options = { method };
+            if (method === 'POST') {
+                const bodyText = document.getElementById('manual-body').value;
+                if (bodyText) {
+                    try {
+                        JSON.parse(bodyText); // Validate JSON
+                        options.body = bodyText;
+                        options.headers = { 'Content-Type': 'application/json' };
+                    } catch (e) {
+                        wsLog('Invalid JSON in manual body', 'error');
+                        return;
+                    }
+                }
+            }
+            
+            wsLog(`${method} ${ep}`, 'info');
+            executeFetch(API_BASE + ep, options);
+        }
+
+        // --- AMS Modal Logic ---
+        function showAmsModal(payloadObj, url, options) {
+            const amsData = printerAmsData[payloadObj.printer_id];
+            const container = document.getElementById('ams-spools-container');
+            container.innerHTML = '';
+            
+            if (amsData.spools && amsData.spools.length > 0) {
+                amsData.spools.forEach((spool, idx) => {
+                    const colorHex = spool.color_hex || spool.color || '#555555';
+                    const material = spool.filament_type || spool.material || 'Unknown';
+                    const empty = spool.empty ? '(Empty)' : '';
+                    
+                    const div = document.createElement('label');
+                    div.className = 'ams-slot-row';
+                    div.innerHTML = `
+                        <input type="radio" name="ams_slot" value="${idx}" ${idx === 0 && !spool.empty ? 'checked' : ''} ${spool.empty ? 'disabled' : ''}>
+                        <span class="color-box" style="background-color: ${colorHex}"></span>
+                        <span style="font-size: 12px; color: ${spool.empty ? '#666' : '#d4d4d4'};">
+                            Slot ${idx} - ${material} ${empty}
+                        </span>
+                    `;
+                    container.appendChild(div);
+                });
+            } else {
+                container.innerHTML = `<p style="font-size: 12px; color: #f48771;">No spool data found in AMS.</p>`;
+            }
+
+            pendingAssignRequest = { payloadObj, url, options };
+            document.getElementById('ams-modal').style.display = 'flex';
+        }
+
+        function cancelAmsSelection() {
+            document.getElementById('ams-modal').style.display = 'none';
+            pendingAssignRequest = null;
+        }
+
+        async function confirmAmsSelection() {
+            if (!pendingAssignRequest) return;
+            
+            const selectedSlot = document.querySelector('input[name="ams_slot"]:checked');
+            if (selectedSlot) {
+                const slotIdx = parseInt(selectedSlot.value);
+                pendingAssignRequest.payloadObj.use_ams = true;
+                pendingAssignRequest.payloadObj.ams_mapping = [slotIdx];
+            }
+
+            const { payloadObj, url, options } = pendingAssignRequest;
+            options.body = JSON.stringify(payloadObj);
+            
+            document.getElementById('ams-modal').style.display = 'none';
+            pendingAssignRequest = null;
+
+            wsLog(`[POST] /api/jobs/assign (AMS Slot Selected)`, 'info');
+            executeFetch(url, options);
+        }
+
+        async function executeFetch(url, options) {
+            try {
+                const res = await fetch(url, options);
+                const text = await res.text();
+                try {
+                    const data = JSON.parse(text);
+                    document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
+                } catch(err) {
+                    document.getElementById('api-response').textContent = text;
+                }
+                
+                if (!res.ok) {
+                    wsLog(`Response Error: ${res.status} ${res.statusText}`, 'error');
+                }
+            } catch (err) {
+                document.getElementById('api-response').textContent = `Fetch Error: ${err.message}`;
+                wsLog(`Fetch Error: ${err.message}`, 'error');
+            }
+        }
+
+        async function submitForm(e, endpoint, method, format) {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            let url = API_BASE + endpoint;
+            let options = { method };
+
+            if (format === 'query') {
+                const params = new URLSearchParams();
+                for (let [k, v] of formData.entries()) {
+                    if (v !== '') params.append(k, v);
+                }
+                const queryString = params.toString();
+                if (queryString) url += '?' + queryString;
+            } else if (format === 'file') {
+                options.body = formData;
+            } else if (format === 'json') {
+                const obj = {};
+                for (let [k, v] of formData.entries()) {
+                    if (v === '') continue;
+                    
+                    // Specific field type conversions
+                    if (['id', 'cluster_id', 'printer_id', 'job_id', 'assigned_printer_id'].includes(k)) {
+                        obj[k] = parseInt(v);
+                    } else if (k === 'total_weight_g') {
+                        obj[k] = parseFloat(v);
+                    } else if (v === 'true') {
+                        obj[k] = true;
+                    } else if (v === 'false') {
+                        obj[k] = false;
+                    } else {
+                        // DON'T parse 'extra' as JSON, backend expects a string containing JSON
+                        obj[k] = v;
+                    }
+                }
+
+                // Intercept Assignment if AMS data exists for printer
+                if (endpoint === '/api/jobs/assign') {
+                    const pid = obj.printer_id;
+                    if (printerAmsData[pid] && printerAmsData[pid].spools) {
+                        showAmsModal(obj, url, options);
+                        return; // Halt normal execution, wait for modal
+                    }
+                }
+
+                options.headers = { 'Content-Type': 'application/json' };
+                options.body = JSON.stringify(obj);
+            }
+
+            wsLog(`[${method}] ${endpoint}`, 'info');
+            executeFetch(url, options);
+        }
+
+        window.addEventListener('load', () => {
+            checkHealth();
+            connectWS();
+        });
+    </script>
+</body>
+</html>

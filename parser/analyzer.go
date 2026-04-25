@@ -3,7 +3,6 @@ package parser
 
 import (
 	"archive/zip"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -284,15 +283,4 @@ func parseFilamentUsed(line string) float32 {
 	var weight float32
 	fmt.Sscanf(valueStr, "%f", &weight)
 	return weight
-}
-
-// SaveAnalysisResult saves analysis to JSON file
-func SaveAnalysisResult(result *AnalysisResult, outputDir string) error {
-	data, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	outputPath := filepath.Join(outputDir, result.Filename+".analysis.json")
-	return os.WriteFile(outputPath, data, 0644)
 }

@@ -4,13 +4,13 @@ go 1.26.2
 
 require (
 	github.com/asfrm/bambusdk-go v1.0.5
-	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/gorilla/websocket v1.5.3
 	modernc.org/sqlite v1.29.5
 )
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/eclipse/paho.mqtt.golang v1.5.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect

@@ -128,13 +128,13 @@ test-coverage: test
 lint:
 	@echo "$(GREEN)Running linters...$(NC)"
 	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run --timeout=5m; \
+		golangci-lint run --config deploy/.golangci.yml --timeout=5m; \
 	elif [ -f $(shell go env GOPATH)/bin/golangci-lint ]; then \
-		$(shell go env GOPATH)/bin/golangci-lint run --timeout=5m; \
+		$(shell go env GOPATH)/bin/golangci-lint run --config deploy/.golangci.yml --timeout=5m; \
 	else \
 		echo "$(YELLOW)golangci-lint not installed, installing...$(NC)"; \
 		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
-		$(shell go env GOPATH)/bin/golangci-lint run --timeout=5m; \
+		$(shell go env GOPATH)/bin/golangci-lint run --config deploy/.golangci.yml --timeout=5m; \
 	fi
 	@echo "$(GREEN)Linting complete$(NC)"
 
@@ -193,7 +193,7 @@ docker:
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
 		-t $(DOCKER_IMAGE):$(DOCKER_TAG) \
 		-t $(DOCKER_IMAGE):latest \
-		.
+		-f deploy/Dockerfile .
 	@echo "$(GREEN)Docker build complete$(NC)"
 
 ## Docker Run: Run Docker container

@@ -511,25 +511,6 @@ func (d *Database) GetPrinterWearStats() ([]PrinterWearStats, error) {
 	return stats, nil
 }
 
-func (d *Database) GetPrinterWearScore(printerID int64) (float64, error) {
-	var totalPrintTimeS, totalPrints, failedPrints int64
-	err := d.Conn.QueryRow(`
-		SELECT COALESCE(total_print_time_s, 0), COALESCE(total_prints, 0), COALESCE(failed_prints, 0)
-		FROM printer_stats WHERE printer_id = ?
-	`, printerID).Scan(&totalPrintTimeS, &totalPrints, &failedPrints)
-
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-
-	hoursPrinted := float64(totalPrintTimeS) / 3600.0
-	failurePenalty := float64(failedPrints) * 100.0
-	return hoursPrinted + failurePenalty, nil
-}
-
 // --- Cluster and Printer Methods ---
 
 func (d *Database) CreateCluster(name, targetModel string) error {
@@ -727,55 +708,6 @@ func (d *Database) SaveBambuTokenAccount(email, username, uid, accessToken, regi
 	return err
 }
 
-func (d *Database) GetBambuAccount(email string) (*BambuAccount, error) {
-	var acc BambuAccount
-	err := d.Conn.QueryRow(`
-		SELECT id, email, password_hash, access_token, refresh_token, token_expiry, 
-		       region, tfa_enabled, tfa_secret, created_at, updated_at
-		FROM bambu_accounts WHERE email = ?
-	`, email).Scan(
-		&acc.ID, &acc.Email, &acc.PasswordHash, &acc.AccessToken, &acc.RefreshToken,
-		&acc.TokenExpiry, &acc.Region, &acc.TFAEnabled, &acc.TFASecret,
-		&acc.CreatedAt, &acc.UpdatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &acc, nil
-}
-
-func (d *Database) GetDefaultBambuAccount() (*BambuAccount, error) {
-	var acc BambuAccount
-	err := d.Conn.QueryRow(`
-		SELECT id, email, password_hash, access_token, refresh_token, token_expiry,
-		       region, tfa_enabled, tfa_secret, created_at, updated_at
-		FROM bambu_accounts ORDER BY id ASC LIMIT 1
-	`).Scan(
-		&acc.ID, &acc.Email, &acc.PasswordHash, &acc.AccessToken, &acc.RefreshToken,
-		&acc.TokenExpiry, &acc.Region, &acc.TFAEnabled, &acc.TFASecret,
-		&acc.CreatedAt, &acc.UpdatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &acc, nil
-}
-
-func (d *Database) UpdateBambuToken(email, accessToken, refreshToken string, tokenExpiry time.Time) error {
-	_, err := d.Conn.Exec(`
-		UPDATE bambu_accounts
-		SET access_token = ?, refresh_token = ?, token_expiry = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE email = ?
-	`, accessToken, refreshToken, tokenExpiry, email)
-	return err
-}
-
 func (d *Database) SetBambuTFA(email string, enabled bool, secret string) error {
 	val := 0
 	if enabled {
@@ -854,15 +786,6 @@ func (d *Database) GetSpools() ([]FilamentSpool, error) {
 		}
 	}
 	return spools, nil
-}
-
-func (d *Database) DeductFilament(printerID int64, weightGrams float32) error {
-	_, err := d.Conn.Exec(`
-		UPDATE spools
-		SET remaining_weight_g = MAX(0, remaining_weight_g - ?)
-		WHERE assigned_printer_id = ?
-	`, weightGrams, printerID)
-	return err
 }
 
 func (d *Database) UpdateJobMetadata(jobID int64, thumbnailURL string, filamentWeight float32) error {

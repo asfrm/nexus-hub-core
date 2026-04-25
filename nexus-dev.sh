@@ -79,11 +79,18 @@ echo ""
 ###############################################################################
 echo -e "${YELLOW}[4/6] Preparing Go backend...${NC}"
 
+# Get version info
+VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 # Run go mod tidy
 echo "   Running go mod tidy..."
 go mod tidy
 
 echo -e "   ${GREEN}✓ Go modules updated${NC}"
+echo -e "   Version: ${BLUE}$VERSION${NC}"
+echo -e "   Commit:  ${BLUE}$GIT_COMMIT${NC}"
 echo ""
 
 ###############################################################################
@@ -91,10 +98,12 @@ echo ""
 ###############################################################################
 echo -e "${YELLOW}[5/6] Building Go backend...${NC}"
 
-# Build the Go backend with CGO disabled for static linking (pure Go MQTT)
-echo "   Running go build -o nexus-hub-core (CGO_ENABLED=0)..."
+# Build the Go backend with CGO disabled for static linking
+echo "   Building nexus-hub-core with ldflags..."
 export CGO_ENABLED=0
-go build -o nexus-hub-core -v .
+go build -v \
+    -ldflags="-s -w -X main.Version=$VERSION -X main.GitCommit=$GIT_COMMIT -X main.BuildDate=$BUILD_DATE" \
+    -o nexus-hub-core .
 
 if [ ! -f "nexus-hub-core" ]; then
     echo -e "   ${RED}✗ Backend build failed${NC}"

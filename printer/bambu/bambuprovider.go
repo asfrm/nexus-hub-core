@@ -1,11 +1,12 @@
-// Package printer provides Bambu Lab printer integration via bambusdk-go
-package printer
+// Package bambu provides Bambu Lab printer integration via bambusdk-go
+package bambu
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"nexus-hub-core/printer/types"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,18 +19,18 @@ import (
 
 // BambuProvider implements PrinterProvider for Bambu Lab printers using bambusdk-go
 type BambuProvider struct {
-	config     PrinterConfig
+	config     types.PrinterConfig
 	printer    *printer.Printer
 	mu         sync.Mutex
-	caps       PrinterCapabilities
-	lastStatus *PrinterStatus
+	caps       types.PrinterCapabilities
+	lastStatus *types.PrinterStatus
 }
 
 // NewBambuProvider creates a new Bambu Lab printer provider
-func NewBambuProvider(config PrinterConfig) *BambuProvider {
+func NewBambuProvider(config types.PrinterConfig) *BambuProvider {
 	bp := &BambuProvider{
 		config: config,
-		caps: PrinterCapabilities{
+		caps: types.PrinterCapabilities{
 			HasCamera:       true,
 			HasLEDControl:   true,
 			HasFanControl:   true,
@@ -87,11 +88,11 @@ func (b *BambuProvider) IsConnected() bool {
 }
 
 // GetStatus returns current printer status
-func (b *BambuProvider) GetStatus(ctx context.Context) (*PrinterStatus, error) {
+func (b *BambuProvider) GetStatus(ctx context.Context) (*types.PrinterStatus, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	status := &PrinterStatus{
+	status := &types.PrinterStatus{
 		PrinterID:    b.config.PrinterID,
 		Temperatures: make(map[string]float32),
 		Targets:      make(map[string]float32),
@@ -219,7 +220,7 @@ func (b *BambuProvider) mapGcodeState(state states.GcodeState) string {
 }
 
 // SendCommand sends a control command to the printer
-func (b *BambuProvider) SendCommand(ctx context.Context, cmd PrinterCommand) error {
+func (b *BambuProvider) SendCommand(ctx context.Context, cmd types.PrinterCommand) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -273,7 +274,7 @@ func (b *BambuProvider) SendCommand(ctx context.Context, cmd PrinterCommand) err
 }
 
 // UploadAndPrint uploads a file and starts printing
-func (b *BambuProvider) UploadAndPrint(ctx context.Context, job PrintJob) error {
+func (b *BambuProvider) UploadAndPrint(ctx context.Context, job types.PrintJob) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -363,7 +364,7 @@ func (b *BambuProvider) ListFiles(ctx context.Context) ([]string, error) {
 }
 
 // GetCapabilities returns printer capabilities
-func (b *BambuProvider) GetCapabilities() PrinterCapabilities {
+func (b *BambuProvider) GetCapabilities() types.PrinterCapabilities {
 	return b.caps
 }
 
