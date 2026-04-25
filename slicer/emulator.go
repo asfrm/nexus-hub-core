@@ -32,8 +32,15 @@ func UploadGCodeHandler(database *db.Database, hub *api.Hub) http.HandlerFunc {
 
 		// Validate file extension
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
-		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && ext != ".bgcode" {
-			http.Error(w, "Invalid file type.", http.StatusBadRequest)
+		allowedExts := map[string]bool{
+			".gcode":     true,
+			".g":         true,
+			".3mf":       true,
+			".gcode.3mf": true,
+		}
+
+		if !allowedExts[ext] && !strings.HasSuffix(strings.ToLower(handler.Filename), ".gcode.3mf") {
+			http.Error(w, "Invalid file type. Supported: .gcode, .3mf (sliced only)", http.StatusBadRequest)
 			return
 		}
 		dstPath := filepath.Join(uploadDir, handler.Filename)

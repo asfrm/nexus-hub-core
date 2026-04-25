@@ -510,9 +510,9 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		}
 		defer file.Close()
 
-		ext := filepath.Ext(handler.Filename)
-		if ext != ".gcode" && ext != ".g" {
-			http.Error(w, "Invalid file type. Only .gcode files are allowed", http.StatusBadRequest)
+		ext := strings.ToLower(filepath.Ext(handler.Filename))
+		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && !strings.HasSuffix(strings.ToLower(handler.Filename), ".gcode.3mf") {
+			http.Error(w, "Invalid file type. Supported: .gcode, .3mf", http.StatusBadRequest)
 			return
 		}
 
@@ -531,13 +531,18 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		}
 		dst.Close()
 
-		meta := slicer.ParseGCodeMetadata(tempPath)
+		analysis, err := parser.AnalyzeFile(tempPath, "uploads")
 		os.Remove(tempPath)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"detected_model": meta.PrinterModel,
-			"filament_type":  meta.FilamentType,
+			"detected_model": analysis.PrinterModel,
+			"filament_type":  analysis.FilamentType,
 		})
 	})
 
@@ -552,153 +557,6 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 	})
 
 	// --- 6. BAMBU LAB API (LAN mode only with bambusdk-go) ---
-
-	// Bambu Login URL - deprecated, bambusdk-go is LAN-only
-	mux.HandleFunc("/api/bambu/login-url", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusGone)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "Cloud mode not supported. bambusdk-go uses LAN mode only.",
-		})
-	})
-
-	// Bambu Token-based Login (OAuth-style)
-	mux.HandleFunc("/api/bambu/token", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			Email       string `json:"email"`
-			Username    string `json:"username"`
-			UID         string `json:"uid"`
-			AccessToken string `json:"access_token"`
-			Region      string `json:"region"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Bad JSON", http.StatusBadRequest)
-			return
-		}
-
-		err := database.SaveBambuTokenAccount(req.Email, req.Username, req.UID, req.AccessToken, req.Region)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Token saved successfully",
-		})
-	})
-
-	// Bambu Callback (for OAuth redirect)
-	mux.HandleFunc("/api/bambu/callback", func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		uid := r.URL.Query().Get("uid")
-		username := r.URL.Query().Get("username")
-		email := r.URL.Query().Get("email")
-		region := r.URL.Query().Get("region")
-
-		if token == "" {
-			http.Error(w, "Token required", http.StatusBadRequest)
-			return
-		}
-
-		err := database.SaveBambuTokenAccount(email, username, uid, token, region)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Authentication Successful</title>
-                <script>
-                    window.opener.postMessage({ success: true, email: '` + email + `' }, '*');
-                    window.close();
-                </script>
-            </head>
-            <body>
-                <h1>Authentication Successful!</h1>
-                <p>You can close this window and return to the application.</p>
-            </body>
-            </html>
-        `))
-	})
-
-	// Bambu Legacy Password Login
-	mux.HandleFunc("/api/bambu/login", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			Email    string `json:"email"`
-			Password string `json:"password"`
-			Region   string `json:"region"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Bad JSON", http.StatusBadRequest)
-			return
-		}
-
-		err := database.SaveBambuAccount(req.Email, req.Password, "", "", req.Region, time.Now())
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": "Account saved. Authentication will occur on first connection.",
-		})
-	})
-
-	// Bambu Verify 2FA
-	mux.HandleFunc("/api/bambu/verify-2fa", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req struct {
-			Email string `json:"email"`
-			Code  string `json:"code"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Bad JSON", http.StatusBadRequest)
-			return
-		}
-
-		err := database.SetBambuTFA(req.Email, true, "")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-		})
-	})
-
-	// Bambu Discover Printers
-	mux.HandleFunc("/api/bambu/discover", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  true,
-			"printers": []interface{}{},
-			"message":  "LAN mode only - please add printers manually via IP",
-		})
-	})
 
 	// Bambu Bind Printer (UPDATED FOR PURE LAN MODE)
 	mux.HandleFunc("/api/bambu/bind", func(w http.ResponseWriter, r *http.Request) {
@@ -752,44 +610,6 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": fmt.Sprintf("Printer '%s' (%s) bound successfully in LAN mode", req.Name, req.Serial),
-		})
-	})
-
-	// Bambu Account List
-	mux.HandleFunc("/api/bambu/accounts", func(w http.ResponseWriter, r *http.Request) {
-		accounts, err := database.ListBambuAccounts()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		for i := range accounts {
-			accounts[i].PasswordHash = "***REDACTED***"
-			accounts[i].TFASecret = "***REDACTED***"
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"accounts": accounts,
-		})
-	})
-
-	// Bambu Delete Account
-	mux.HandleFunc("/api/bambu/account/delete", func(w http.ResponseWriter, r *http.Request) {
-		id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid ID", http.StatusBadRequest)
-			return
-		}
-
-		if err := database.DeleteBambuAccount(id); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
 		})
 	})
 
@@ -897,8 +717,16 @@ func handleSlicerUpload(database *db.Database, hub *api.Hub) http.HandlerFunc {
 		defer file.Close()
 
 		ext := strings.ToLower(filepath.Ext(handler.Filename))
-		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && ext != ".gcode.3mf" {
-			http.Error(w, "Invalid file type. Only .gcode and .3mf files are allowed", http.StatusBadRequest)
+		// Only accept slicer-processed files containing printer commands
+		allowedExts := map[string]bool{
+			".gcode":     true,
+			".g":         true,
+			".3mf":       true,
+			".gcode.3mf": true,
+		}
+
+		if !allowedExts[ext] && !strings.HasSuffix(strings.ToLower(handler.Filename), ".gcode.3mf") {
+			http.Error(w, "Invalid file type. Supported: .gcode, .3mf (sliced only)", http.StatusBadRequest)
 			return
 		}
 
