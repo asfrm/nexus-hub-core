@@ -21,10 +21,10 @@ linters-settings:
     simplify: true
 
   govet:
-    check-shadowing: false
     enable-all: false
 
 issues:
+  uniq-by-line: true
   exclude-rules:
     # Exclude some staticcheck messages
     - linters:
@@ -39,7 +39,6 @@ output:
     - format: colored-line-number
   print-issued-lines: true
   print-linter-name: true
-  uniq-by-line: true
   path-prefix: ""
   sort-results: true
 
