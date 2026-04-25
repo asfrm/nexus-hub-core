@@ -113,6 +113,10 @@ func NewDatabase(dbPath string) (*Database, error) {
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
+	// Enable WAL mode and set busy timeout for concurrency
+	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
+
 	d := &Database{Conn: db}
 	err = d.setupTables()
 	return d, err

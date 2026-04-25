@@ -51,6 +51,12 @@ func main() {
 	// 4. Run Test Scenario
 	runTestScenario(database, hub)
 
+	// 5. Stress & Security Tests
+	testURL := "http://localhost:8081"
+	RunSecurityTest(testURL)
+	RunStressTest(testURL)
+	RunBreakerTest(testURL)
+
 	log.Println("✅ Testing Complete. Shutting down...")
 	time.Sleep(1 * time.Second)
 }
