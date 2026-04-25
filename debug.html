@@ -177,7 +177,6 @@
 
         <div class="panel">
             <h2>Printers Management</h2>
-            <button onclick="fetchData('/api/bambu/discover')">Discover Bambu Printers (LAN)</button>
             <button onclick="fetchData('/api/printers/wear')">Get Wear Stats</button>
             
             <form onsubmit="submitForm(event, '/api/printers/add', 'POST', 'json')">
@@ -224,38 +223,6 @@
                     </div>
                 </div>
                 <button type="submit">Send Command</button>
-            </form>
-        </div>
-
-        <div class="panel">
-            <h2>Bambu Accounts</h2>
-            <button onclick="fetchData('/api/bambu/accounts')">List Bambu Accounts</button>
-            
-            <form onsubmit="submitForm(event, '/api/bambu/login', 'POST', 'json')">
-                <h3>Add Bambu Account (Legacy/LAN)</h3>
-                <div class="form-grid">
-                    <div><label>Email</label><input type="email" name="email" required></div>
-                    <div><label>Password/AccessCode</label><input type="password" name="password" required></div>
-                    <div><label>Region</label><select name="region"><option value="US">US</option><option value="EU">EU</option><option value="CN">CN</option><option value="LAN">LAN</option></select></div>
-                </div>
-                <button type="submit">Save Account</button>
-            </form>
-
-            <form onsubmit="submitForm(event, '/api/bambu/verify-2fa', 'POST', 'json')">
-                <h3>Verify 2FA</h3>
-                <div class="form-grid">
-                    <div><label>Email</label><input type="email" name="email" required></div>
-                    <div><label>2FA Code</label><input type="text" name="code" required></div>
-                </div>
-                <button type="submit">Verify</button>
-            </form>
-
-            <form onsubmit="submitForm(event, '/api/bambu/account/delete', 'GET', 'query')">
-                <h3>Delete Bambu Account</h3>
-                <div class="form-grid">
-                    <div><label>Account ID</label><input type="number" name="id" required></div>
-                </div>
-                <button type="submit" class="btn-red">Delete Account</button>
             </form>
         </div>
 

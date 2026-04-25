@@ -102,34 +102,6 @@ type FilamentSpool struct {
 	PrinterName string  `json:"printer_name,omitempty"`
 }
 
-// BambuAccount represents a saved Bambu Lab cloud account
-type BambuAccount struct {
-	ID           int64     `json:"id"`
-	Email        string    `json:"email"`
-	Username     string    `json:"username"`
-	UID          string    `json:"uid"`
-	PasswordHash string    `json:"-"` // Encrypted password (legacy)
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	TokenExpiry  time.Time `json:"token_expiry"`
-	Region       string    `json:"region"` // US, EU, CN
-	TFAEnabled   bool      `json:"tfa_enabled"`
-	TFASecret    string    `json:"-"`           // Encrypted TFA secret
-	AuthMethod   string    `json:"auth_method"` // TOKEN, PASSWORD, OAUTH
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-// BambuPrinter represents a printer discovered from cloud account
-type BambuPrinter struct {
-	Serial    string `json:"serial"`
-	Name      string `json:"name"`
-	Model     string `json:"model"`
-	Online    bool   `json:"online"`
-	IPAddress string `json:"ip"`
-	BindCode  string `json:"bind_code,omitempty"`
-}
-
 func NewDatabase(dbPath string) (*Database, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -232,19 +204,6 @@ func (d *Database) setupTables() error {
 			successful_prints INTEGER DEFAULT 0,
 			failed_prints INTEGER DEFAULT 0,
 			last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS bambu_accounts (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			email TEXT UNIQUE NOT NULL,
-			password_hash TEXT,
-			access_token TEXT,
-			refresh_token TEXT,
-			token_expiry DATETIME,
-			region TEXT DEFAULT 'US',
-			tfa_enabled INTEGER DEFAULT 0,
-			tfa_secret TEXT,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 	}
 	for _, q := range queries {
@@ -673,81 +632,6 @@ func (d *Database) GetSystemAnalytics() (map[string]interface{}, error) {
 	analytics["avg_print_time_minutes"] = avgTime / 60.0
 
 	return analytics, nil
-}
-
-// --- Bambu Account Management Methods ---
-
-func (d *Database) SaveBambuAccount(email, passwordHash, accessToken, refreshToken, region string, tokenExpiry time.Time) error {
-	_, err := d.Conn.Exec(`
-		INSERT INTO bambu_accounts (email, password_hash, access_token, refresh_token, token_expiry, region, auth_method, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 'PASSWORD', CURRENT_TIMESTAMP)
-		ON CONFLICT(email) DO UPDATE SET
-			access_token = excluded.access_token,
-			refresh_token = excluded.refresh_token,
-			token_expiry = excluded.token_expiry,
-			region = excluded.region,
-			auth_method = excluded.auth_method,
-			updated_at = CURRENT_TIMESTAMP
-	`, email, passwordHash, accessToken, refreshToken, tokenExpiry)
-	return err
-}
-
-// SaveBambuTokenAccount saves a Bambu account using token-based authentication
-func (d *Database) SaveBambuTokenAccount(email, username, uid, accessToken, region string) error {
-	_, err := d.Conn.Exec(`
-		INSERT INTO bambu_accounts (email, username, uid, access_token, region, auth_method, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 'TOKEN', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-		ON CONFLICT(email) DO UPDATE SET
-			username = excluded.username,
-			uid = excluded.uid,
-			access_token = excluded.access_token,
-			region = excluded.region,
-			auth_method = excluded.auth_method,
-			updated_at = CURRENT_TIMESTAMP
-	`, email, username, uid, accessToken, region)
-	return err
-}
-
-func (d *Database) SetBambuTFA(email string, enabled bool, secret string) error {
-	val := 0
-	if enabled {
-		val = 1
-	}
-	_, err := d.Conn.Exec(`
-		UPDATE bambu_accounts SET tfa_enabled = ?, tfa_secret = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE email = ?
-	`, val, secret, email)
-	return err
-}
-
-func (d *Database) DeleteBambuAccount(id int64) error {
-	_, err := d.Conn.Exec("DELETE FROM bambu_accounts WHERE id = ?", id)
-	return err
-}
-
-func (d *Database) ListBambuAccounts() ([]BambuAccount, error) {
-	rows, err := d.Conn.Query(`
-		SELECT id, email, password_hash, access_token, refresh_token, token_expiry,
-		       region, tfa_enabled, tfa_secret, created_at, updated_at
-		FROM bambu_accounts ORDER BY created_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	accounts := []BambuAccount{}
-	for rows.Next() {
-		var acc BambuAccount
-		if err := rows.Scan(
-			&acc.ID, &acc.Email, &acc.PasswordHash, &acc.AccessToken, &acc.RefreshToken,
-			&acc.TokenExpiry, &acc.Region, &acc.TFAEnabled, &acc.TFASecret,
-			&acc.CreatedAt, &acc.UpdatedAt,
-		); err == nil {
-			accounts = append(accounts, acc)
-		}
-	}
-	return accounts, nil
 }
 
 // --- Filament Spool Methods ---
