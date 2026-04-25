@@ -227,9 +227,11 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 	// Job assignment + PRINT TRIGGER
 	mux.HandleFunc("/api/jobs/assign", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			JobID     int64 `json:"job_id"`
-			ClusterID int64 `json:"cluster_id"`
-			PrinterID int64 `json:"printer_id"`
+			JobID      int64 `json:"job_id"`
+			ClusterID  int64 `json:"cluster_id"`
+			PrinterID  int64 `json:"printer_id"`
+			UseAMS     bool  `json:"use_ams"`
+			AMSMapping []int `json:"ams_mapping"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Bad JSON", http.StatusBadRequest)
@@ -272,7 +274,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 			if found {
 				filePath := filepath.Join("uploads", job.Filename)
 
-				go func(p db.Printer, path string, id int64) {
+				go func(p db.Printer, path string, id int64, useAMS bool, mapping []int) {
 					var printErr error
 
 					if p.PrinterType == "BAMBULAB" {
@@ -298,6 +300,10 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 								printJob := types.PrintJob{
 									Filename: job.Filename,
 									FileData: fileData,
+									Metadata: map[string]interface{}{
+										"use_ams":     useAMS,
+										"ams_mapping": mapping,
+									},
 								}
 								// 3. Upload and Print via MQTT/FTP
 								printErr = provider.UploadAndPrint(ctx, printJob)
@@ -338,7 +344,7 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 							},
 						})
 					}
-				}(targetPrinter, filePath, req.JobID)
+				}(targetPrinter, filePath, req.JobID, req.UseAMS, req.AMSMapping)
 			}
 		}
 

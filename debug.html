@@ -61,7 +61,9 @@
         button:hover { background: #1177bb; }
         button.btn-red { background: #a1260d; }
         button.btn-red:hover { background: #c53012; }
-        input, select {
+        button.btn-green { background: #16825d; }
+        button.btn-green:hover { background: #1a966a; }
+        input, select, textarea {
             background: #3c3c3c;
             color: #d4d4d4;
             border: 1px solid #3e3e42;
@@ -129,7 +131,7 @@
         <h1>🔧 Nexus Hub Core - Debug Panel</h1>
 
         <div class="panel">
-            <h2>System Health</h2>
+            <h2>System Health & Stats</h2>
             <div id="health-status">
                 <span class="status disconnected">Checking...</span>
             </div>
@@ -150,7 +152,7 @@
                 <h3>Create Cluster</h3>
                 <div class="form-grid">
                     <div><label>Name</label><input type="text" name="name" required></div>
-                    <div><label>Target Model</label><input type="text" name="target_model"></div>
+                    <div><label>Target Model</label><input type="text" name="target_model" placeholder="e.g. Bambu Lab X1C"></div>
                 </div>
                 <button type="submit">Create</button>
             </form>
@@ -175,7 +177,6 @@
 
         <div class="panel">
             <h2>Printers Management</h2>
-            <button onclick="fetchData('/api/scanner/discover')">Discover Network Printers</button>
             <button onclick="fetchData('/api/bambu/discover')">Discover Bambu Printers (LAN)</button>
             <button onclick="fetchData('/api/printers/wear')">Get Wear Stats</button>
             
@@ -188,7 +189,7 @@
                     <div><label>Type</label><select name="printer_type"><option value="MOONRAKER">MOONRAKER</option><option value="BAMBULAB">BAMBULAB</option></select></div>
                     <div><label>Serial</label><input type="text" name="serial"></div>
                     <div><label>Access Code</label><input type="text" name="access_code"></div>
-                    <div style="grid-column: span 3;"><label>Extra (JSON)</label><input type="text" name="extra" placeholder="{}"></div>
+                    <div style="grid-column: span 3;"><label>Extra (JSON string)</label><input type="text" name="extra" placeholder='{"local_ip": "1.2.3.4"}'></div>
                 </div>
                 <button type="submit">Add Printer</button>
             </form>
@@ -198,7 +199,7 @@
                 <div class="form-grid cols-3">
                     <div><label>IP Address</label><input type="text" name="ip_address" required></div>
                     <div><label>Serial</label><input type="text" name="serial" required></div>
-                    <div><label>Access Code (Bind Code)</label><input type="text" name="access_code" placeholder="8-char PIN" required></div>
+                    <div><label>Access Code (PIN)</label><input type="text" name="access_code" placeholder="8-char PIN" required></div>
                     <div><label>Name</label><input type="text" name="name" required></div>
                     <div><label>Model</label><input type="text" name="model" required></div>
                     <div><label>Cluster ID</label><input type="number" name="cluster_id" required></div>
@@ -227,6 +228,38 @@
         </div>
 
         <div class="panel">
+            <h2>Bambu Accounts</h2>
+            <button onclick="fetchData('/api/bambu/accounts')">List Bambu Accounts</button>
+            
+            <form onsubmit="submitForm(event, '/api/bambu/login', 'POST', 'json')">
+                <h3>Add Bambu Account (Legacy/LAN)</h3>
+                <div class="form-grid">
+                    <div><label>Email</label><input type="email" name="email" required></div>
+                    <div><label>Password/AccessCode</label><input type="password" name="password" required></div>
+                    <div><label>Region</label><select name="region"><option value="US">US</option><option value="EU">EU</option><option value="CN">CN</option><option value="LAN">LAN</option></select></div>
+                </div>
+                <button type="submit">Save Account</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/bambu/verify-2fa', 'POST', 'json')">
+                <h3>Verify 2FA</h3>
+                <div class="form-grid">
+                    <div><label>Email</label><input type="email" name="email" required></div>
+                    <div><label>2FA Code</label><input type="text" name="code" required></div>
+                </div>
+                <button type="submit">Verify</button>
+            </form>
+
+            <form onsubmit="submitForm(event, '/api/bambu/account/delete', 'GET', 'query')">
+                <h3>Delete Bambu Account</h3>
+                <div class="form-grid">
+                    <div><label>Account ID</label><input type="number" name="id" required></div>
+                </div>
+                <button type="submit" class="btn-red">Delete Account</button>
+            </form>
+        </div>
+
+        <div class="panel">
             <h2>Jobs & Vault</h2>
             <button onclick="fetchData('/api/jobs')">Get Pending Jobs</button>
             <button onclick="fetchData('/api/jobs/list')">Get Active Jobs</button>
@@ -239,7 +272,7 @@
                     <div><label>Cluster ID</label><input type="number" name="cluster_id" required></div>
                     <div><label>Printer ID</label><input type="number" name="printer_id" required></div>
                 </div>
-                <button type="submit">Assign & Start Print</button>
+                <button type="submit" class="btn-green">Assign & Start Print</button>
             </form>
         </div>
 
@@ -274,10 +307,10 @@
                 <h3>Add Spool</h3>
                 <div class="form-grid cols-3">
                     <div><label>Material</label><input type="text" name="material" required placeholder="e.g. PLA"></div>
-                    <div><label>Color</label><input type="text" name="color"></div>
-                    <div><label>Color Hex</label><input type="text" name="color_hex" placeholder="#FFFFFF"></div>
+                    <div><label>Color</label><input type="text" name="color" placeholder="e.g. Red"></div>
+                    <div><label>Color Hex</label><input type="text" name="color_hex" placeholder="#FF0000"></div>
                     <div><label>Total Weight (g)</label><input type="number" step="0.1" name="total_weight_g" required></div>
-                    <div><label>Assigned Printer ID</label><input type="number" name="assigned_printer_id"></div>
+                    <div><label>Assigned Printer ID</label><input type="number" name="assigned_printer_id" placeholder="0 if none"></div>
                 </div>
                 <button type="submit">Add Spool</button>
             </form>
@@ -290,14 +323,19 @@
     <div class="side-col">
         <div class="panel" style="flex: 1; display: flex; flex-direction: column; margin-bottom: 0;">
             <h2>API Response Data</h2>
-            <div>
+            <div style="margin-bottom: 10px;">
                 <input type="text" id="manual-endpoint" placeholder="/api/endpoint" style="width: calc(100% - 110px); display: inline-block;">
                 <button onclick="fetchManual()" style="width: 100px;">Send GET</button>
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column;">
+                <label>POST Data (for manual requests)</label>
+                <textarea id="manual-body" style="height: 80px; margin-bottom: 5px;" placeholder='{"key": "value"}'></textarea>
+                <button onclick="fetchManual('POST')" class="btn-green">Send POST (JSON)</button>
             </div>
             <pre id="api-response">// Responses will appear here...</pre>
         </div>
 
-        <div class="panel" style="flex: 1; display: flex; flex-direction: column;">
+        <div class="panel" style="height: 300px; display: flex; flex-direction: column;">
             <h2>WebSocket Live Log</h2>
             <div>
                 Status: <span id="ws-status" class="status disconnected">Disconnected</span>
@@ -352,8 +390,8 @@
 
         function connectWS() {
             if (ws) return wsLog('Already connected', 'warn');
-            const wsUrl = `ws://${window.location.host}/ws`;
-            wsLog(`Connecting...`);
+            const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
+            wsLog(`Connecting to ${wsUrl}...`);
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -391,23 +429,30 @@
 
         async function fetchData(endpoint) {
             wsLog(`GET ${endpoint}`, 'info');
-            try {
-                const res = await fetch(API_BASE + endpoint);
-                const text = await res.text();
-                try {
-                    const data = JSON.parse(text);
-                    document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
-                } catch(e) {
-                    document.getElementById('api-response').textContent = text;
-                }
-            } catch (err) {
-                document.getElementById('api-response').textContent = `Error: ${err.message}`;
-            }
+            return executeFetch(API_BASE + endpoint, { method: 'GET' });
         }
 
-        function fetchManual() {
+        async function fetchManual(method = 'GET') {
             const ep = document.getElementById('manual-endpoint').value;
-            if (ep) fetchData(ep);
+            if (!ep) return;
+            
+            const options = { method };
+            if (method === 'POST') {
+                const bodyText = document.getElementById('manual-body').value;
+                if (bodyText) {
+                    try {
+                        JSON.parse(bodyText); // Validate JSON
+                        options.body = bodyText;
+                        options.headers = { 'Content-Type': 'application/json' };
+                    } catch (e) {
+                        wsLog('Invalid JSON in manual body', 'error');
+                        return;
+                    }
+                }
+            }
+            
+            wsLog(`${method} ${ep}`, 'info');
+            executeFetch(API_BASE + ep, options);
         }
 
         // --- AMS Modal Logic ---
@@ -476,8 +521,13 @@
                 } catch(err) {
                     document.getElementById('api-response').textContent = text;
                 }
+                
+                if (!res.ok) {
+                    wsLog(`Response Error: ${res.status} ${res.statusText}`, 'error');
+                }
             } catch (err) {
-                document.getElementById('api-response').textContent = `Error: ${err.message}`;
+                document.getElementById('api-response').textContent = `Fetch Error: ${err.message}`;
+                wsLog(`Fetch Error: ${err.message}`, 'error');
             }
         }
 
@@ -492,20 +542,28 @@
                 for (let [k, v] of formData.entries()) {
                     if (v !== '') params.append(k, v);
                 }
-                url += '?' + params.toString();
+                const queryString = params.toString();
+                if (queryString) url += '?' + queryString;
             } else if (format === 'file') {
                 options.body = formData;
             } else if (format === 'json') {
                 const obj = {};
                 for (let [k, v] of formData.entries()) {
                     if (v === '') continue;
-                    if (['id', 'cluster_id', 'printer_id', 'job_id', 'assigned_printer_id'].includes(k)) obj[k] = parseInt(v);
-                    else if (k === 'total_weight_g') obj[k] = parseFloat(v);
-                    else if (v === 'true') obj[k] = true;
-                    else if (v === 'false') obj[k] = false;
-                    else if (k === 'extra' && v) {
-                        try { obj[k] = JSON.parse(v); } catch(err) { obj[k] = v; }
-                    } else obj[k] = v;
+                    
+                    // Specific field type conversions
+                    if (['id', 'cluster_id', 'printer_id', 'job_id', 'assigned_printer_id'].includes(k)) {
+                        obj[k] = parseInt(v);
+                    } else if (k === 'total_weight_g') {
+                        obj[k] = parseFloat(v);
+                    } else if (v === 'true') {
+                        obj[k] = true;
+                    } else if (v === 'false') {
+                        obj[k] = false;
+                    } else {
+                        // DON'T parse 'extra' as JSON, backend expects a string containing JSON
+                        obj[k] = v;
+                    }
                 }
 
                 // Intercept Assignment if AMS data exists for printer
