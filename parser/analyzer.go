@@ -15,6 +15,9 @@ import (
 
 // ThreeMFMetadata represents 3MF slicing metadata (Bambu/Orca style)
 type ThreeMFMetadata struct {
+	Header struct {
+		PrinterModel string `xml:"printer_model"`
+	} `xml:"header"`
 	Slicing struct {
 		Plate []struct {
 			PrintTime      int64   `xml:"print_time,attr"`
@@ -59,9 +62,14 @@ type AnalysisResult struct {
 func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
 
-	// Handle special .gcode.3mf case
+	// Handle special .gcode.3mf case with fallback
 	if strings.HasSuffix(strings.ToLower(filePath), ".gcode.3mf") {
-		return analyze3MF(filePath, uploadDir)
+		result, err := analyze3MF(filePath, uploadDir)
+		if err == nil {
+			return result, nil
+		}
+		// If it's not a valid ZIP, try analyzing it as a GCODE file
+		return analyzeGCODE(filePath, uploadDir)
 	}
 
 	switch ext {
@@ -89,7 +97,7 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 
 	r, err := zip.OpenReader(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open 3MF: %w", err)
+		return nil, fmt.Errorf("failed to open 3MF as zip: %w", err)
 	}
 	defer r.Close()
 
@@ -100,11 +108,12 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 		// Sliced 3MFs (Orca/Bambu) MUST contain these or similar entries
 		if strings.Contains(f.Name, "Metadata/slice_info") ||
 			strings.Contains(f.Name, "Metadata/model.metadata") ||
-			strings.Contains(f.Name, "metadata.xml") {
+			strings.Contains(f.Name, "metadata.xml") ||
+			strings.HasSuffix(f.Name, ".config") {
 			hasSlicingConfig = true
 		}
 
-		// Check for presence of G-code within the archive (the real payload)
+		// Check for presence of G-code within the archive
 		if strings.HasSuffix(f.Name, ".gcode") {
 			hasGCode = true
 		}
@@ -119,19 +128,56 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 			}
 		}
 
-		// Parse metadata XML (Priority to model.metadata.3mf as it contains more detail)
+		// Parse metadata XML
 		if strings.HasSuffix(f.Name, "metadata.xml") || strings.HasSuffix(f.Name, "model.metadata.3mf") {
 			_ = parseMetadata(f, result)
 		}
+
+		// Fallback for OrcaSlicer config files (INI style)
+		if strings.HasSuffix(f.Name, "slice_info.config") || strings.HasSuffix(f.Name, "config.ini") {
+			_ = parseConfigINI(f, result)
+		}
 	}
 
-	// VALIDATION: If no slicing config or G-code found, it's a raw 3D model
+	// If metadata parsing failed to find model/filament, try to guess from filename
+	if result.PrinterModel == "Unknown" {
+		guessFromFilename(result)
+	}
+
+	// VALIDATION: If no slicing config or G-code found, it's likely a raw 3D model
 	if !hasSlicingConfig && !hasGCode {
 		return nil, fmt.Errorf("file is a raw 3D model, not a sliced printer file")
 	}
 
 	result.IsSliced = true
 	return result, nil
+}
+
+// guessFromFilename tries to extract info from filenames like "Part_PETG_1h2m.gcode"
+func guessFromFilename(result *AnalysisResult) {
+	upperName := strings.ToUpper(result.Filename)
+	if strings.Contains(upperName, "PETG") {
+		result.FilamentType = "PETG"
+	} else if strings.Contains(upperName, "PLA") {
+		result.FilamentType = "PLA"
+	} else if strings.Contains(upperName, "ABS") {
+		result.FilamentType = "ABS"
+	} else if strings.Contains(upperName, "ASA") {
+		result.FilamentType = "ASA"
+	} else if strings.Contains(upperName, "TPU") {
+		result.FilamentType = "TPU"
+	}
+
+	// Try to guess printer model
+	if strings.Contains(upperName, "X1C") || strings.Contains(upperName, "X1") {
+		result.PrinterModel = "Bambu Lab X1C"
+	} else if strings.Contains(upperName, "P1P") {
+		result.PrinterModel = "Bambu Lab P1P"
+	} else if strings.Contains(upperName, "P1S") {
+		result.PrinterModel = "Bambu Lab P1S"
+	} else if strings.Contains(upperName, "A1") {
+		result.PrinterModel = "Bambu Lab A1"
+	}
 }
 
 // analyzeGCODE parses a GCODE file scanning for slicer-specific comments
@@ -188,6 +234,11 @@ func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
 		}
 	}
 
+	// Fallback guess from filename if GCode scan missed it
+	if result.PrinterModel == "Generic" || result.FilamentType == "PLA" {
+		guessFromFilename(result)
+	}
+
 	return result, nil
 }
 
@@ -223,6 +274,11 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 		return err
 	}
 
+	// Set Printer Model from Header
+	if metadata.Header.PrinterModel != "" {
+		result.PrinterModel = metadata.Header.PrinterModel
+	}
+
 	if len(metadata.Slicing.Plate) > 0 {
 		plate := metadata.Slicing.Plate[0]
 		if plate.PrintTime > 0 {
@@ -246,12 +302,35 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	}
 
 	if len(metadata.Materials) > 0 {
-		// Use the material type if we don't have one yet
 		if result.FilamentType == "Unknown" || result.FilamentType == "" {
 			result.FilamentType = metadata.Materials[0].Type
 		}
 	}
 
+	return nil
+}
+
+func parseConfigINI(file *zip.File, result *AnalysisResult) error {
+	rc, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	scanner := bufio.NewScanner(rc)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "filament_type") {
+			if val := extractValue(line); val != "" {
+				result.FilamentType = val
+			}
+		}
+		if strings.Contains(line, "printer_model") {
+			if val := extractValue(line); val != "" {
+				result.PrinterModel = val
+			}
+		}
+	}
 	return nil
 }
 
