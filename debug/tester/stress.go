@@ -13,7 +13,7 @@ import (
 
 func RunMegaBlitz(ctx context.Context, baseURL string) {
 	log.Println("⚡ INITIALIZING MEGA BLITZ ATTACK (30s duration)...")
-	
+
 	blitzCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -78,7 +78,7 @@ func RunMegaBlitz(ctx context.Context, baseURL string) {
 
 			req, _ := http.NewRequestWithContext(blitzCtx, "POST", baseURL+"/api/files/local", body)
 			req.Header.Set("Content-Type", writer.FormDataContentType())
-			
+
 			client := &http.Client{}
 			resp, err := client.Do(req)
 			if err == nil {

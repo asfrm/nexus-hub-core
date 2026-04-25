@@ -1,17 +1,19 @@
-// Package parser provides 3MF and GCODE file analysis
+// Package parser provides 3MF, GCODE, and 3D model file analysis
 package parser
 
 import (
 	"archive/zip"
+	"bufio"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-// ThreeMFMetadata represents 3MF slicing metadata
+// ThreeMFMetadata represents 3MF slicing metadata (Bambu/Orca style)
 type ThreeMFMetadata struct {
 	Slicing struct {
 		Plate []struct {
@@ -49,63 +51,81 @@ type AnalysisResult struct {
 	BedTemp        float32 `json:"bed_temp"`
 	HasMultiColor  bool    `json:"has_multi_color"`
 	ColorCount     int     `json:"color_count"`
+	PrinterModel   string  `json:"printer_model"`
 }
 
-// AnalyzeFile analyzes a 3MF or GCODE file
+// AnalyzeFile analyzes a wide range of slicer and 3D model formats
 func AnalyzeFile(filePath, uploadDir string) (*AnalysisResult, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
+	if strings.HasSuffix(strings.ToLower(filePath), ".gcode.3mf") {
+		return analyze3MF(filePath, uploadDir)
+	}
 
 	switch ext {
 	case ".3mf":
 		return analyze3MF(filePath, uploadDir)
 	case ".gcode", ".g":
 		return analyzeGCODE(filePath, uploadDir)
-	case ".gcode.3mf":
-		return analyze3MF(filePath, uploadDir)
+	case ".stl", ".obj", ".zip":
+		return analyzeGeneric(filePath)
 	default:
-		return nil, fmt.Errorf("unsupported file type: %s", ext)
+		// Try generic analysis for any other file
+		return analyzeGeneric(filePath)
 	}
 }
 
-// analyze3MF parses a 3MF file (ZIP archive)
-func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
-	result := &AnalysisResult{
-		Filename: filepath.Base(filePath),
-	}
-
-	// Get file size
+// analyzeGeneric provides basic info for formats without embedded slicing metadata
+func analyzeGeneric(filePath string) (*AnalysisResult, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return nil, err
 	}
-	result.FileSize = info.Size()
 
-	// Open ZIP archive
+	return &AnalysisResult{
+		Filename:     filepath.Base(filePath),
+		FileSize:     info.Size(),
+		FilamentType: "Unknown",
+		PrinterModel: "Generic",
+	}, nil
+}
+
+// analyze3MF parses a 3MF file (ZIP archive) for metadata and thumbnails
+func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
+	result := &AnalysisResult{
+		Filename:     filepath.Base(filePath),
+		FilamentType: "PLA",
+		PrinterModel: "Generic",
+	}
+
+	info, err := os.Stat(filePath)
+	if err == nil {
+		result.FileSize = info.Size()
+	}
+
 	r, err := zip.OpenReader(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open 3MF: %w", err)
 	}
 	defer r.Close()
 
-	// Look for metadata and thumbnail
 	for _, f := range r.File {
-		// Extract thumbnail
-		if strings.Contains(f.Name, "Metadata/plate_") && strings.HasSuffix(f.Name, ".png") {
-			thumbnailPath := filepath.Join(uploadDir, "thumbnails", f.Name)
+		// Extract thumbnail (support both Bambu and Orca paths)
+		if (strings.Contains(f.Name, "Metadata/plate_") || strings.Contains(f.Name, ".png")) &&
+			(strings.HasSuffix(f.Name, ".png") || strings.HasSuffix(f.Name, ".jpg")) {
+			// Save thumbnail to the static uploads/thumbnails directory
+			safeName := strings.ReplaceAll(f.Name, "/", "_")
+			thumbnailPath := filepath.Join(uploadDir, "thumbnails", safeName)
 			if err := extractFile(f, thumbnailPath); err == nil {
-				result.ThumbnailURL = "/uploads/thumbnails/" + f.Name
+				result.ThumbnailURL = "/uploads/thumbnails/" + safeName
 			}
 		}
 
 		// Parse metadata XML
 		if strings.HasSuffix(f.Name, "metadata.xml") || strings.HasSuffix(f.Name, "model.metadata.3mf") {
-			if err := parseMetadata(f, result); err != nil {
-				// Log or handle error if needed, but don't just leave it empty if possible
-				continue
-			}
+			_ = parseMetadata(f, result)
 		}
 
-		// Check for multi-color (multiple materials)
+		// Check for multi-color
 		if strings.HasSuffix(f.Name, "model.metadata.3mf") {
 			if colors, err := countColors(f); err == nil {
 				result.ColorCount = colors
@@ -117,6 +137,89 @@ func analyze3MF(filePath, uploadDir string) (*AnalysisResult, error) {
 	return result, nil
 }
 
+// analyzeGCODE parses a GCODE file scanning for slicer-specific comments
+func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
+	result := &AnalysisResult{
+		Filename:     filepath.Base(filePath),
+		FilamentType: "PLA",
+		PrinterModel: "Generic",
+	}
+
+	info, err := os.Stat(filePath)
+	if err == nil {
+		result.FileSize = info.Size()
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	// Only scan the first 64KB for performance
+	linesRead := 0
+	for scanner.Scan() && linesRead < 2000 {
+		linesRead++
+		line := scanner.Text()
+		if !strings.HasPrefix(line, ";") {
+			continue
+		}
+
+		line = strings.TrimSpace(line)
+
+		// Time Estimation
+		if strings.Contains(line, "estimated printing time") {
+			result.EstimatedTimeS = parseTimeEstimate(line)
+		}
+
+		// Filament Weight
+		if strings.Contains(line, "filament used") && strings.Contains(line, "[g]") {
+			result.FilamentWeight = parseFilamentUsed(line)
+		}
+
+		// Filament Type
+		if strings.Contains(line, "filament_type") {
+			result.FilamentType = extractValue(line)
+		}
+
+		// Printer Model
+		if strings.Contains(line, "printer_model") || strings.Contains(line, "model_id") {
+			result.PrinterModel = extractValue(line)
+		}
+
+		// Temperatures
+		if strings.Contains(line, "nozzle_temperature") || strings.Contains(line, "temperature") {
+			_, _ = fmt.Sscanf(extractValue(line), "%f", &result.NozzleTemp)
+		}
+		if strings.Contains(line, "bed_temperature") {
+			_, _ = fmt.Sscanf(extractValue(line), "%f", &result.BedTemp)
+		}
+
+		// Layer Height
+		if strings.Contains(line, "layer_height") {
+			fmt.Sscanf(extractValue(line), "%f", &result.LayerHeight)
+		}
+	}
+
+	return result, nil
+}
+
+func extractValue(line string) string {
+	parts := strings.Split(line, "=")
+	if len(parts) < 2 {
+		parts = strings.Split(line, ":")
+	}
+	if len(parts) >= 2 {
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, "; \"'")
+		if val != "" && !strings.ContainsAny(val, "{}[]") {
+			return val
+		}
+	}
+	return ""
+}
+
 // parseMetadata extracts slicing information from metadata XML
 func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	rc, err := file.Open()
@@ -125,7 +228,6 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	}
 	defer rc.Close()
 
-	// Read and parse XML
 	data, err := io.ReadAll(rc)
 	if err != nil {
 		return err
@@ -136,18 +238,20 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 		return err
 	}
 
-	// Extract first plate info
 	if len(metadata.Slicing.Plate) > 0 {
 		plate := metadata.Slicing.Plate[0]
 		result.EstimatedTimeS = plate.PrintTime
 		result.FilamentWeight = plate.FilamentWeight
 		result.LayerHeight = plate.LayerHeight
 		result.Infill = plate.Infill
-		result.NozzleTemp = plate.NozzleTemper
-		result.BedTemp = plate.BedTemper
+		if plate.NozzleTemper > 0 {
+			result.NozzleTemp = plate.NozzleTemper
+		}
+		if plate.BedTemper > 0 {
+			result.BedTemp = plate.BedTemper
+		}
 	}
 
-	// Extract material info
 	if len(metadata.Materials) > 0 {
 		result.FilamentType = metadata.Materials[0].Type
 	}
@@ -155,130 +259,68 @@ func parseMetadata(file *zip.File, result *AnalysisResult) error {
 	return nil
 }
 
-// countColors counts the number of unique materials/colors
 func countColors(file *zip.File) (int, error) {
 	rc, err := file.Open()
 	if err != nil {
 		return 0, err
 	}
 	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return 0, err
-	}
-
+	data, _ := io.ReadAll(rc)
 	var metadata ThreeMFMetadata
-	if err := xml.Unmarshal(data, &metadata); err != nil {
-		return 0, err
-	}
-
+	_ = xml.Unmarshal(data, &metadata)
 	return len(metadata.Materials), nil
 }
 
-// analyzeGCODE parses a GCODE file for metadata
-func analyzeGCODE(filePath, uploadDir string) (*AnalysisResult, error) {
-	result := &AnalysisResult{
-		Filename: filepath.Base(filePath),
-	}
-
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return nil, err
-	}
-	result.FileSize = info.Size()
-
-	// Open and read header comments
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	buf := make([]byte, 8192) // Read first 8KB for metadata
-	n, _ := file.Read(buf)
-	header := string(buf[:n])
-
-	// Parse common slicer metadata
-	lines := strings.Split(header, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-
-		if strings.HasPrefix(line, "; estimated printing time") {
-			result.EstimatedTimeS = parseTimeEstimate(line)
-		}
-		if strings.HasPrefix(line, "; filament used") {
-			result.FilamentWeight = parseFilamentUsed(line)
-		}
-		if strings.HasPrefix(line, "; filament_type =") {
-			result.FilamentType = strings.TrimSpace(strings.TrimPrefix(line, "; filament_type ="))
-		}
-	}
-
-	return result, nil
-}
-
-// extractFile extracts a file from ZIP to destination
 func extractFile(file *zip.File, destPath string) error {
-	// Create directory if needed
 	dir := filepath.Dir(destPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
+	_ = os.MkdirAll(dir, 0755)
 	rc, err := file.Open()
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
-
 	out, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-
 	_, err = io.Copy(out, rc)
 	return err
 }
 
-// parseTimeEstimate extracts time from GCODE comment
 func parseTimeEstimate(line string) int64 {
-	// Format: "; estimated printing time = 2h 15m 30s"
 	parts := strings.Split(line, "=")
 	if len(parts) < 2 {
 		return 0
 	}
-
 	timeStr := strings.TrimSpace(parts[1])
+
 	var total int64
-
-	// Parse hours, minutes, seconds
-	fmt.Sscanf(timeStr, "%dh %dm %ds", &total)
-
-	// Simple parsing - can be enhanced
-	if strings.Contains(timeStr, "h") {
-		var h, m, s int
-		fmt.Sscanf(timeStr, "%dh %dm %ds", &h, &m, &s)
-		total = int64(h*3600 + m*60 + s)
-	} else if strings.Contains(timeStr, "m") {
-		var m, s int
-		fmt.Sscanf(timeStr, "%dm %ds", &m, &s)
-		total = int64(m*60 + s)
+	// Handle format: 2h 15m 30s
+	hParts := strings.Split(timeStr, "h")
+	if len(hParts) > 1 {
+		h, _ := strconv.ParseInt(strings.TrimSpace(hParts[0]), 10, 64)
+		total += h * 3600
+		timeStr = hParts[1]
 	}
+	mParts := strings.Split(timeStr, "m")
+	if len(mParts) > 1 {
+		m, _ := strconv.ParseInt(strings.TrimSpace(mParts[0]), 10, 64)
+		total += m * 60
+		timeStr = mParts[1]
+	}
+	sParts := strings.Split(timeStr, "s")
+	s, _ := strconv.ParseInt(strings.TrimSpace(sParts[0]), 10, 64)
+	total += s
 
 	return total
 }
 
-// parseFilamentUsed extracts filament weight from GCODE comment
 func parseFilamentUsed(line string) float32 {
-	// Format: "; filament used [mm] = 1234.5, [g] = 34.56"
 	parts := strings.Split(line, "[g]")
 	if len(parts) < 2 {
 		return 0
 	}
-
-	// Extract gram value
 	valueStr := strings.TrimSpace(strings.TrimPrefix(parts[1], "="))
 	var weight float32
 	fmt.Sscanf(valueStr, "%f", &weight)

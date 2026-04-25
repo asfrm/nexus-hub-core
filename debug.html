@@ -248,14 +248,14 @@
             <button onclick="fetchData('/api/setup/unassigned')">Get Unassigned Setup Models</button>
 
             <form onsubmit="submitForm(event, '/api/setup/analyze-gcode', 'POST', 'file')">
-                <h3>Analyze G-Code</h3>
-                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g"></div>
+                <h3>Analyze G-Code / 3MF</h3>
+                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g,.3mf"></div>
                 <button type="submit">Upload & Analyze</button>
             </form>
 
             <form onsubmit="submitForm(event, '/api/files/local', 'POST', 'file')">
-                <h3>Upload Print Job (OctoPrint/Slicer API)</h3>
-                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g,.3mf"></div>
+                <h3>Upload Print Job (All Formats)</h3>
+                <div style="margin-bottom:10px;"><input type="file" name="file" required accept=".gcode,.g,.3mf,.stl,.obj,.zip"></div>
                 <button type="submit">Upload to Vault</button>
             </form>
 

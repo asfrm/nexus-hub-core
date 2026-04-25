@@ -13,7 +13,7 @@ type BambuMock struct {
 
 func StartBambuMock(ip string, port int) *BambuMock {
 	b := &BambuMock{IP: ip, Port: port}
-	
+
 	// Mock MQTT (port 1883)
 	go func() {
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", 1883))

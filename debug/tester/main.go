@@ -39,7 +39,7 @@ func main() {
 
 	// 3. Initialize Hub Components
 	log.Println("📦 Initializing Hub Components...")
-	
+
 	poller := printer.NewPoller(database, hub)
 	go poller.Start(ctx)
 
@@ -48,7 +48,7 @@ func main() {
 
 	// Start web engine on a test port
 	go web.StartWebEngine(database, hub, 8081)
-	
+
 	time.Sleep(2 * time.Second) // Wait for startup
 
 	// 4. Run Test Scenario
@@ -65,13 +65,13 @@ func main() {
 
 func runTestScenario(database *db.Database, hub *api.Hub) {
 	log.Println("🧪 Pre-populating 1000 printers via Transaction...")
-	
+
 	tx, _ := database.Conn.Begin()
 	for i := 1; i <= 500; i++ {
 		// Moonraker
 		tx.Exec("INSERT INTO printers (cluster_id, name, ip_address, printer_type, serial, access_code, username, password, access_token, api_key, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			1, fmt.Sprintf("Moon-%d", i), "127.0.0.1:7125", "MOONRAKER", fmt.Sprintf("MOON%03d", i), "", "", "", "", "", "")
-		
+
 		// Bambu
 		tx.Exec("INSERT INTO printers (cluster_id, name, ip_address, printer_type, serial, access_code, username, password, access_token, api_key, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			1, fmt.Sprintf("Bambu-%d", i), "127.0.0.1", "BAMBULAB", fmt.Sprintf("BAMB%03d", i), "12345678", "bblp", "", "", "", `{"local_ip": "127.0.0.1"}`)
