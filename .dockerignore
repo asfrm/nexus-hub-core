@@ -1,0 +1,25 @@
+# Docker ignore file
+.git
+.github
+.gitignore
+.vscode
+.idea
+*.md
+LICENSE
+Makefile
+*.sh
+hub.db
+hub.db-*
+bambu_mqtt_dump.log
+*.log
+build/
+dist/
+uploads/
+gcode_vault/
+!gcode_vault/.gitkeep
+nexus-hub
+nexus-hub-core
+*.exe
+*.test
+coverage.out
+coverage.html

@@ -1,0 +1,47 @@
+# GolangCI-Lint Configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  allow-parallel-runners: true
+
+linters:
+  disable-all: true
+  enable:
+    # Enabled linters (minimal set for stability)
+    - gofmt          # Format checking
+    - govet          # Standard Go vet
+    - staticcheck    # Advanced static analysis
+    - ineffassign    # Ineffective assignments
+    - typecheck      # Type checking
+
+linters-settings:
+  gofmt:
+    simplify: true
+
+  govet:
+    check-shadowing: false
+    enable-all: false
+
+issues:
+  exclude-rules:
+    # Exclude some staticcheck messages
+    - linters:
+        - staticcheck
+      text: "SA1019:"  # Using deprecated code
+
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  formats:
+    - format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+  uniq-by-line: true
+  path-prefix: ""
+  sort-results: true
+
+severity:
+  default-severity: error
