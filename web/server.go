@@ -510,9 +510,9 @@ func StartWebEngine(database *db.Database, hub *api.Hub, port int) {
 		}
 		defer file.Close()
 
-		ext := filepath.Ext(handler.Filename)
-		if ext != ".gcode" && ext != ".g" {
-			http.Error(w, "Invalid file type. Only .gcode files are allowed", http.StatusBadRequest)
+		ext := strings.ToLower(filepath.Ext(handler.Filename))
+		if ext != ".gcode" && ext != ".g" && ext != ".3mf" && !strings.HasSuffix(strings.ToLower(handler.Filename), ".gcode.3mf") {
+			http.Error(w, "Invalid file type. Supported: .gcode, .3mf", http.StatusBadRequest)
 			return
 		}
 
